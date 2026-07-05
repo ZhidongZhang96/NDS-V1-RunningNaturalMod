@@ -1,0 +1,16 @@
+# pip requirements for the NDS Visual Coding project.
+#
+# Prefer environment.yml (conda) — it also installs the compiled HDF5 stack.
+# Use this file only if you ALREADY have a Python 3.10 env with HDF5 + PyTables, e.g.:
+#     conda create -n allensdk python=3.10 -y
+#     conda activate allensdk
+#     conda install -c conda-forge hdf5 pytables -y
+#     pip install -r requirements.txt
+#
+# Python must be >= 3.10 (utils.py uses `str | None` runtime unions).
+
+setuptools<81        # AllenSDK still imports pkg_resources (removed in setuptools >= 81)
+allensdk==2.16.2     # pulls in numpy 1.23.5, pandas 1.5.3, scipy 1.10.1, matplotlib, statsmodels, seaborn
+scikit-learn         # for the EncodingModel (Analysis 3) linear fits
+jupyter_black        # notebook code formatter used in visual_coding.ipynb
+ipykernel            # register the env as a Jupyter kernel

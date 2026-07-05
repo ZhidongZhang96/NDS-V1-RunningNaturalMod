@@ -1,0 +1,25 @@
+# Conda environment for the NDS Visual Coding project.
+# Recreate with:   conda env create -f environment.yml
+# Then:            conda activate allensdk
+#
+# Notes:
+# - Python is pinned to 3.10 (NOT 3.9): utils.py uses `str | None` runtime unions
+#   in the TrialData dataclass, which require Python >= 3.10.
+# - hdf5 + pytables come from conda-forge (compiled HDF5 stack); AllenSDK is pip-installed.
+# - setuptools is pinned < 81 because AllenSDK still imports pkg_resources.
+# - numpy 1.23.5 / pandas 1.5.3 / scipy 1.10.1 are pulled in (and pinned) by AllenSDK 2.16.2.
+name: allensdk
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - hdf5
+  - pytables
+  - pip
+  - pip:
+      - "setuptools<81"
+      - allensdk==2.16.2
+      - scikit-learn
+      - jupyter_black
+      - ipykernel
