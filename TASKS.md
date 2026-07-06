@@ -37,7 +37,7 @@ Two published repos are near-exact references for our analyses. **Both are grati
 
 ## Phase 0 — Shared prerequisites (do together first)
 
-- [ ] Obtain `visual_coding_data.npz`, place in `../data/` (beside the repo); confirm `load_data()` + `extract_trials()` run for all four stimuli in [`visual_coding.ipynb`](visual_coding.ipynb). **Blocks everyone.**
+- [x] Obtain `visual_coding_data.npz`, place in `../data/` (beside the repo); confirm `load_data()` + `extract_trials()` run for all four stimuli in [`visual_coding.ipynb`](visual_coding.ipynb). **Blocks everyone.**
 - [ ] Fix response windows once: `dg=(10,60)`, `sg/ns=(5,7)`, `spontaneous=(0,60)` (Plan.md §1). ⚠️ On the ~7-frame sg/ns trials, offset 5 + duration 7 runs *past* stimulus offset into the slow GCaMP6f decay and the next trial — choose this deliberately (the calcium transient outlasts the 0.23 s stimulus; per-image averaging over randomized repeats mitigates cross-trial bleed). See "Grating vs Natural" below.
 - [ ] **Decide blank-sweep handling for `natural_scenes`:** the `frame` column codes the grey/blank sweep as `-1` (the 118 real images are `0–117`). `extract_trials` passes `frame` through untouched and nothing in the repo filters it — **exclude (or separately label) `frame == -1` trials** before any per-image f(S) or tuning.
 - [ ] Add two shared reducers to `utils.py` (owner: **A**, reviewed by all):

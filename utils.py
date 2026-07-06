@@ -13,7 +13,7 @@ def check_stim(stimulus:str):
 # ==============================================================================
 
 
-def load_data(path="../data"):
+def load_data(path="data"):
     raw = dict(np.load(Path(path) / "visual_coding_data.npz", allow_pickle=True))
     data = {
         "matched_cell_ids": raw["matched_cell_ids"],
