@@ -212,6 +212,11 @@ def extract_trials(
         s_key = "A" if stimulus == "drifting_gratings" else "B"
         s = data["sessions"][s_key]
         stim_tables = s["stim_tables"][stimulus]
+
+        if stimulus == 'natural_scenes': 
+            # remove the -1 frame (blank-sweep)
+            stim_tables = stim_tables[stim_tables['frame'] != -1]
+            
         trial_starts = np.array(stim_tables["start"]) + offset
         windows = [
             (s_key, int(start), int(start + duration))
