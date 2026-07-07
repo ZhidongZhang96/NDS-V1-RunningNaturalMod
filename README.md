@@ -10,7 +10,7 @@ It has been shown that layer 2/3 and 4 neurons in mouse V1 are positively modula
 
 > How does running speed modulate V1 neuron responses, and how does that modulation differ across stimulus types (`drifting_gratings`, `static_gratings`, `natural_scenes`) and compared to spontaneous (no-stimulus) activity?
 
-We focus on how running speed modulates response amplitude, via three analyses (see [`Plan.md`](Plan.md) for the full math):
+We focus on how running speed modulates response amplitude, via three analyses (see [`Plan.md`](doc/Plan.md) for the full math):
 
 1. **Binned speed tuning** — bin running speed, build per-neuron tuning curves, test significance against shuffles (Levene), and quantify monotonicity with Spearman's ρ.
 2. **Binary running/still conditions** — split trials into *running* vs *still*, compute a Modulation Index `MI = (R_run − R_still) / (R_run + R_still)`, and fit a gain model `R_run = a·R_still + b` (a = multiplicative, b = additive).
@@ -26,7 +26,7 @@ We focus on how running speed modulates response amplitude, via three analyses (
 | [`visual_coding.ipynb`](visual_coding.ipynb) | Main analysis notebook (loads the exported `.npz`, uses `utils.py`) |
 | [`allensdk.ipynb`](allensdk.ipynb) | Supplementary: pulls cell metadata directly from the Allen SDK |
 | [`neurons_metadata.csv`](neurons_metadata.csv) | Exported per-cell Allen metrics (tuning, reliability, run-modulation, receptive fields) |
-| [`Plan.md`](Plan.md) | Analysis plan with the mathematical details |
+| [`Plan.md`](doc/Plan.md) | Analysis plan with the mathematical details |
 | `boc/` | Allen SDK cache manifest + stimulus mappings |
 | `environment.yml`, `requirements.txt` | Environment specs (see below) |
 
