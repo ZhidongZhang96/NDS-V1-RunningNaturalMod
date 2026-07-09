@@ -133,7 +133,7 @@ class TrialData:
     responses : np.ndarray
         ΔF/F within the response window (with offset after stimuli onset), shape ``(n_cells, n_trials, len_windows)``.
     running_speed : np.ndarray
-        Running speed during each trial, shape ``(n_trials,)``.
+        Running speed during each trial, shape ``(n_trials, duration)``.
     time : np.ndarray
         Real time points for each trial, in seconds, shape ``(n_trials, duration)``.
     stimulus_params : dict[str, np.ndarray]
@@ -469,23 +469,36 @@ class SpeedTuning:
     (tuning curve), then tests each neuron's selectivity via a shuffle test
     and reports Spearman correlation between response and running speed.
 
+    Each instance corresponds to **one analysis scenario** — a single
+    stimulus, or multiple stimuli pooled together (e.g. all visual stimuli
+    vs. spontaneous).
+
     Inspired by (Christensen & Pillow, 2022)
 
     Parameters
     ----------
-    trial_data : TrialData
-        Extracted per-trial responses and running speed.
+    trial_data : TrialData | dict[str, TrialData]
+        Single :class:`TrialData` for one stimulus, or a dict mapping
+        stimulus names to :class:`TrialData` (pooled together).
+    label : str, optional
+        Human-readable label for this analysis scenario, used in plot titles.
+        If empty, auto-generated from dict keys.
     """
 
-    def __init__(self, trial_data: TrialData):
-        self._td = trial_data
+    def __init__(self, trial_data: TrialData | dict[str, TrialData], label: str = ""):
+        if isinstance(trial_data, TrialData):
+            self._td: dict[str, TrialData] = {"": trial_data}
+        else:
+            self._td = trial_data
+        self.label = label or ", ".join(k for k in self._td if k)
+
         # filled by compute_tuning()
         self.bin_centers = None       # np.ndarray, shape (n_bins,)
         self.mean_responses = None    # np.ndarray, shape (n_bins, n_cells)
         self.std_responses = None     # np.ndarray, shape (n_bins, n_cells)
         # filled by significance_test()
         self.p_values = None          # np.ndarray, shape (n_cells,)
-        self.significant_mask = None       # np.ndarray of bool, shape (n_cells,)
+        self.significant_mask = None  # np.ndarray of bool, shape (n_cells,)
         # filled by compute_spearman()
         self.rho = None               # np.ndarray, shape (n_cells,)
         self.rho_p_values = None      # np.ndarray, shape (n_cells,)
@@ -536,26 +549,39 @@ class SpeedTuning:
 
     # ------------- plotting -------------
 
-    def plot_tuning_curve(self, cell: int = None, ax=None) -> plt.Figure:
+    def plot_tuning_curve(self, cell: int = None, ax=None) -> plt.Axes:
         """Plot speed tuning curve(s).
 
         Parameters
         ----------
         cell : int or None, optional
-            If given, plot a single cell. Otherwise plot all cells as
-            an image / heatmap.
+            If given, plot a single cell. Otherwise show all cells
+            as a heatmap.
+        ax : matplotlib.axes.Axes, optional
+            Axes to draw into. Creates a new one if None.
 
         Returns
         -------
-        plt.Figure
+        plt.Axes
+            The axes that were drawn into.
         """
         raise NotImplementedError
 
-    def plot_significant_neurons(self, ax=None) -> plt.Figure:
+    def plot_significant_neurons(self, ax=None) -> plt.Axes:
         """Highlight neurons that pass the significance test.
 
         Useful formats: bar chart of p-values with threshold line, or a
         scatter of significant vs. non-significant cells.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes, optional
+            Axes to draw into. Creates a new one if None.
+
+        Returns
+        -------
+        plt.Axes
+            The axes that were drawn into.
         """
         raise NotImplementedError
 
