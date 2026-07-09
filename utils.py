@@ -213,9 +213,13 @@ def extract_trials(
         s = data["sessions"][s_key]
         stim_tables = s["stim_tables"][stimulus]
 
-        if stimulus == 'natural_scenes': 
-            # remove the -1 frame (blank-sweep)
+        # remove the blank-sweep trial, where the params are all NaN for gratings
+        if stimulus == 'drifting_gratings':
+            stim_tables = stim_tables[stim_tables['blank_sweep'] != 1].drop(columns=['blank_sweep'])
+        elif stimulus == 'natural_scenes': 
             stim_tables = stim_tables[stim_tables['frame'] != -1]
+        elif stimulus == 'static_gratings': 
+            stim_tables = stim_tables.dropna(subset=['orientation'])
             
         trial_starts = np.array(stim_tables["start"]) + offset
         windows = [
