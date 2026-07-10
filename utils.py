@@ -246,6 +246,8 @@ def extract_trials(
     trial_data.running_speed = np.stack(all_speeds, axis=0)    # (n_trials, duration)
     trial_data.time = np.stack(all_times, axis=0)               # (n_trials, duration)
 
+    # running speed should be non-negative
+    trial_data.running_speed[trial_data.running_speed < 0] = 0
     return trial_data
 
 
