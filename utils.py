@@ -487,39 +487,97 @@ class SpeedTuning:
         If empty, auto-generated from dict keys.
     """
 
-    def __init__(self, trial_data: TrialData | dict[str, TrialData], label: str = ""):
-        if isinstance(trial_data, TrialData):
-            self._td: dict[str, TrialData] = {"": trial_data}
-        else:
-            self._td = trial_data
-        self.label = label or ", ".join(k for k in self._td if k)
+    def __init__(self, trial_data: TrialData | dict[str, TrialData], label: str = "", n_bins: int = 20):
+        self._td = trial_data
+        self.label = label  # or ", ".join(k for k in self._td if k)
+
+        self.n_bins = n_bins
+        self.responses: np.ndarray | None = None             # shape (n_cells, n_trials_total)
+        self.speeds: np.ndarray | None = None                # shape (n_cells, n_trials_total)
+        self.bins_masking: np.ndarray | None = None          # shape (n_trials_total,)
 
         # filled by compute_tuning()
-        self.bin_centers = None       # np.ndarray, shape (n_bins,)
-        self.mean_responses = None    # np.ndarray, shape (n_bins, n_cells)
-        self.std_responses = None     # np.ndarray, shape (n_bins, n_cells)
-        # filled by significance_test()
-        self.p_values = None          # np.ndarray, shape (n_cells,)
-        self.significant_mask = None  # np.ndarray of bool, shape (n_cells,)
-        # filled by compute_spearman()
-        self.rho = None               # np.ndarray, shape (n_cells,)
-        self.rho_p_values = None      # np.ndarray, shape (n_cells,)
+        self.bins_edges: np.ndarray | None = None            # shape (n_bins+1,)
+        self.mean_all_responses: np.ndarray | None = None    # shape (n_cells, n_bins)
+        self.mean_responses: np.ndarray | None = None        # shape (n_bins,)
+        self.std_responses: np.ndarray | None = None         # shape (n_bins,)
 
-    def compute_tuning(self, n_bins: int = 20):
+        # filled by significance_test()
+        self.p_values: np.ndarray | None = None              # shape (n_cells,)
+        self.significant_mask: np.ndarray | None = None      # bool, shape (n_cells,)
+
+        # filled by compute_spearman()
+        self.rho: np.ndarray | None = None                   # shape (n_cells,)
+        self.rho_p_values: np.ndarray | None = None          # shape (n_cells,)
+
+    # ------------- helpers -------------
+
+    def _pooled(self):
+        """Pool trials across all stored TrialData.
+
+        Averages the response and running-speed time windows to produce
+        one value per trial, then concatenates trials from all stimuli.
+
+        Returns
+        -------
+        responses : np.ndarray, shape ``(n_cells, n_trials_total)``
+            Mean ΔF/F per trial (averaged over the response window).
+        speed : np.ndarray, shape ``(n_trials_total,)``
+            Mean running speed per trial (averaged over the trial window).
+        """
+        if isinstance(self._td, TrialData):
+            return self._td.responses.mean(axis=-1), self._td.running_speed.mean(axis=-1)
+        all_r, all_v = [], []
+        for td in self._td.values():
+            all_r.append(td.responses.mean(axis=-1))         # (n_cells, n_trials)
+            all_v.append(td.running_speed.mean(axis=-1))     # (n_trials,)
+        return np.concatenate(all_r, axis=1), np.concatenate(all_v, axis=0)
+
+    def _binned_responses(self, responses, speeds):
+        """Bin running speed and average responses per bin.                               
+                                                                                        
+        Parameters                                                                        
+        ----------                                                                        
+        responses : np.ndarray, shape ``(n_cells, n_trials)``                             
+        speeds : np.ndarray, shape ``(n_trials,)``                                        
+        n_bins : int                                                                      
+                                                                                            
+        Returns                                                                           
+        -------                                                                           
+        bins_edges : np.ndarray, shape ``(n_bins+1,)``                                    
+        mean_all_responses : np.ndarray, shape ``(n_cells, n_bins)``                                                    
+        """  
+        # bin the speed
+        bins_edges = np.linspace(speeds.min(), speeds.max()+1e-6, num=self.n_bins+1)
+        bins_masking = np.digitize(speeds, bins=bins_edges)  
+        # compute the mean and std of responses
+        mean_all_responses = []
+        for b in range(1, self.n_bins+1):
+            res_bin = responses[:, bins_masking==b]   # (n_cells, n_trial in the bin)
+            mean_all_responses.append(res_bin.mean(axis=1))
+
+        mean_all_responses = np.array(mean_all_responses).T
+
+        return bins_edges, bins_masking, mean_all_responses
+
+    # ------------- core computation -------------
+
+    def compute_tuning(self):
         """Bin trials by running speed and compute tuning curves.
 
         Parameters
         ----------
         n_bins : int, optional
             Number of equal-width speed bins, by default 20.
-
-        Stores
-        ------
-        bin_centers : np.ndarray, shape ``(n_bins,)``
-        mean_responses : np.ndarray, shape ``(n_bins, n_cells)``
-        std_responses : np.ndarray, shape ``(n_bins, n_cells)``
         """
-        raise NotImplementedError
+        self.responses, self.speeds = self._pooled()
+        self.bins_edges, self.bins_masking, self.mean_all_responses = \
+            self._binned_responses(self.responses, self.speeds, self.n_bins)
+        # compute the mean and std across cells
+        self.mean_responses = self.mean_all_responses.mean(axis=0)
+        self.std_responses = self.mean_all_responses.std(axis=0)
+
+
 
     def significance_test(self, n_shuffles: int = 1000):
         """Shuffle running-speed labels and re-compute tuning curves to assess significance.
@@ -537,7 +595,8 @@ class SpeedTuning:
         p_values : np.ndarray, shape ``(n_cells,)``
         significant_mask : np.ndarray of bool, shape ``(n_cells,)``
         """
-        raise NotImplementedError
+        
+
 
     def compute_spearman(self):
         """Spearman rank correlation between response and running speed per cell.
