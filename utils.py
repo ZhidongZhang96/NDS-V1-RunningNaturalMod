@@ -493,7 +493,7 @@ class SpeedTuning:
 
         self.n_bins = n_bins
         self.responses: np.ndarray | None = None             # shape (n_cells, n_trials_total)
-        self.speeds: np.ndarray | None = None                # shape (n_cells, n_trials_total)
+        self.speeds: np.ndarray | None = None                # shape (n_trials_total,)
         self.bins_masking: np.ndarray | None = None          # shape (n_trials_total,)
 
         # filled by compute_tuning()
@@ -533,30 +533,35 @@ class SpeedTuning:
             all_v.append(td.running_speed.mean(axis=-1))     # (n_trials,)
         return np.concatenate(all_r, axis=1), np.concatenate(all_v, axis=0)
 
-    def _binned_responses(self, responses, speeds):
-        """Bin running speed and average responses per bin.                               
-                                                                                        
-        Parameters                                                                        
-        ----------                                                                        
-        responses : np.ndarray, shape ``(n_cells, n_trials)``                             
-        speeds : np.ndarray, shape ``(n_trials,)``                                        
-        n_bins : int                                                                      
-                                                                                            
-        Returns                                                                           
-        -------                                                                           
-        bins_edges : np.ndarray, shape ``(n_bins+1,)``                                    
-        mean_all_responses : np.ndarray, shape ``(n_cells, n_bins)``                                                    
-        """  
+    def _binned_responses(self, bins_masking=None):
+        """Bin trials by ``bins_masking`` and average responses per bin.
+
+        Parameters
+        ----------
+        bins_masking : np.ndarray or None
+            Bin assignments for each trial, shape ``(n_trials,)``.
+            Uses ``self.bins_masking`` if None.
+
+        Returns
+        -------
+        bins_edges : np.ndarray, shape ``(n_bins+1,)``
+        bins_masking : np.ndarray, shape ``(n_trials,)``
+        mean_all_responses : np.ndarray, shape ``(n_cells, n_bins)``
+        """
         # bin the speed
-        bins_edges = np.linspace(speeds.min(), speeds.max()+1e-6, num=self.n_bins+1)
-        bins_masking = np.digitize(speeds, bins=bins_edges)  
+        if self.bins_edges is None:
+            bins_edges = np.linspace(self.speeds.min(), self.speeds.max()+1e-6, num=self.n_bins+1)
+        else:
+            bins_edges = self.bins_edges
+        if bins_masking is None:
+            bins_masking = np.digitize(self.speeds, bins_edges) if self.bins_masking is None else self.bins_masking
+
         # compute the mean and std of responses
         mean_all_responses = []
         for b in range(1, self.n_bins+1):
-            res_bin = responses[:, bins_masking==b]   # (n_cells, n_trial in the bin)
+            res_bin = self.responses[:, bins_masking==b]   # (n_cells, n_trial in the bin)
             mean_all_responses.append(res_bin.mean(axis=1))
-
-        mean_all_responses = np.array(mean_all_responses).T
+        mean_all_responses = np.array(mean_all_responses).T # (n_cells, n_bins)
 
         return bins_edges, bins_masking, mean_all_responses
 
@@ -572,30 +577,52 @@ class SpeedTuning:
         """
         self.responses, self.speeds = self._pooled()
         self.bins_edges, self.bins_masking, self.mean_all_responses = \
-            self._binned_responses(self.responses, self.speeds, self.n_bins)
+            self._binned_responses()
         # compute the mean and std across cells
         self.mean_responses = self.mean_all_responses.mean(axis=0)
         self.std_responses = self.mean_all_responses.std(axis=0)
 
 
 
-    def significance_test(self, n_shuffles: int = 1000):
+    def significance_test(self, n_shuffles: int = 1000, threshold: float = 0.05):
         """Shuffle running-speed labels and re-compute tuning curves to assess significance.
 
-        Uses Levene's test to compare the observed tuning-curve variance
-        against the shuffled distribution.
+        Uses a permutation test: shuffles bin labels ``n_shuffles`` times to
+        build a null distribution of tuning-curve variances, then computes the
+        fraction of shuffled variances exceeding the observed variance as the
+        p-value for each cell. 
+        
+        Levene's t test of variance mentioned in (Christensen & Pillow, 2022).
+
 
         Parameters
         ----------
         n_shuffles : int, optional
             Number of shuffles, by default 1000.
+        threshold : float, optional
+            Significance threshold, by default 0.05.
 
         Stores
         ------
         p_values : np.ndarray, shape ``(n_cells,)``
         significant_mask : np.ndarray of bool, shape ``(n_cells,)``
         """
+        # the real tuning
+        vs_real = self.mean_all_responses.var(axis=1)   # (n_cells)
         
+        # shuffled
+        vs_shuffled = []
+        for _ in range(n_shuffles):
+            shuffled_bins_masking = np.random.permutation(self.bins_masking)
+            _, _, mean_all_res = self._binned_responses(bins_masking=shuffled_bins_masking) # (n_cells, n_bins)
+            vs_shuffled.append(mean_all_res.var(axis=1))
+        vs_shuffled = np.array(vs_shuffled).T   # (n_cells, n_shuffles)
+
+        self.p_values = np.mean(vs_shuffled < vs_real[:, np.newaxis], axis=1)    # (n_cells)
+        self.significant_mask = self.p_values < threshold
+
+
+
 
 
     def compute_spearman(self):
