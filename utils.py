@@ -501,7 +501,7 @@ class SpeedTuning:
         self.speeds: np.ndarray | None = None                # shape (n_trials_total,)
         self.bins_masking: np.ndarray | None = None          # shape (n_trials_total,)
 
-        # filled by compute_tuning()
+        # by compute_tuning()
         self.bins_edges: np.ndarray | None = None            # shape (n_bins+1,)
         self.mean_all_responses: np.ndarray | None = None    # shape (n_cells, n_bins)
         self.mean_responses: np.ndarray | None = None        # shape (n_bins,)
@@ -612,9 +612,12 @@ class SpeedTuning:
         p_values : np.ndarray, shape ``(n_cells,)``
         significant_mask : np.ndarray of bool, shape ``(n_cells,)``
         """
+        assert self.mean_all_responses is not None, "call compute_tuning() first"
+        assert self.bins_masking is not None, "call compute_tuning() first"
+
         # the real tuning
         vs_real = self.mean_all_responses.var(axis=1)   # (n_cells)
-        
+
         # shuffled
         vs_shuffled = []
         for _ in range(n_shuffles):
@@ -623,12 +626,11 @@ class SpeedTuning:
             vs_shuffled.append(mean_all_res.var(axis=1))
         vs_shuffled = np.array(vs_shuffled).T   # (n_cells, n_shuffles)
 
-        self.p_values = np.mean(vs_shuffled < vs_real[:, np.newaxis], axis=1)    # (n_cells)
-        self.significant_mask = self.p_values < threshold
+        p_values = np.mean(vs_shuffled < vs_real[:, np.newaxis], axis=1)    # (n_cells) ()
+        significant_mask = p_values < threshold
 
-
-
-
+        self.levene_p_values = p_values
+        self.significant_mask = significant_mask
 
     def compute_spearman(self):
         """Spearman rank correlation between response and running speed per cell.
