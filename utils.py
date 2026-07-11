@@ -515,11 +515,7 @@ class SpeedTuning:
         # by compute_spearman()
         self.rho: np.ndarray | None = None                   # shape (n_cells,)
         self.rho_p_values: np.ndarray | None = None          # shape (n_cells,)
-        self.monotonical_mask : dict[str, np.ndarray | None] = dict({
-            'increasing': None, 
-            'decreasing': None, 
-            'non-monotonically': None
-            }) 
+        self.monotonic_mask : dict[str, np.ndarray] | None = None
         
 
     # ------------- helpers -------------
@@ -654,7 +650,7 @@ class SpeedTuning:
         ------
         rho : np.ndarray, shape ``(n_cells,)``
         rho_p_values : np.ndarray, shape ``(n_cells,)``
-        monotonical_mask : dict[str, np.array], with elements shape ``(n_cells,)``
+        monotonic_mask : dict[str, np.array], with elements shape ``(n_cells,)``
         """
         assert self.responses is not None, "call compute_tuning() first"
         assert self.bins_masking is not None, "call compute_tuning() first"
@@ -670,21 +666,19 @@ class SpeedTuning:
         rho = res.statistic[0, 1:]          # (n_cells,)
         rho_p_values = res.pvalue[0, 1:]    # (n_cells,)
 
-        # categorize monotonicity: increasing, decreasing, or non-monotonic but tuned
-        increasing = (rho > 0) & (rho_p_values < threshold) & self.significant_mask
-        decreasing = (rho < 0) & (rho_p_values < threshold) & self.significant_mask
-        non_monotonically =  (rho_p_values > threshold) & self.significant_mask
+        # categorize monotonicity: positive, negative, or non-monotonic but tuned
+        monotonic_mask = {
+            'positive': (rho > 0) & (rho_p_values < threshold) & self.significant_mask,
+            'negative': (rho < 0) & (rho_p_values < threshold) & self.significant_mask,
+            'non-monotonic': (rho_p_values > threshold) & self.significant_mask
+        }
 
         self.rho = rho
         self.rho_p_values = rho_p_values
-        self.monotonical_mask = {
-            'increasing': increasing,
-            'decreasing': decreasing,
-            'non-monotonically': non_monotonically
-        }
+        self.monotonic_mask = monotonic_mask
 
 
-    # ------------- plotting -------------
+    # ------------- plotting & printing -------------
 
     def plot_tuning_curve(self, cells: list[int] | None = None, figsize=(5,3), semcolor = 'pink', ax=None) -> plt.Axes:
         """Plot speed tuning curve with Mean and SEM over the given cells.
@@ -724,29 +718,139 @@ class SpeedTuning:
         ax.set_ylim(bottom=0)
         return ax
 
-    def plot_tuning_cells(self):
-        """Plot speed tuning for each given cells in a density map"""
-        raise NotImplementedError
+    def print_tuned_cells(self):
+        assert self.significant_mask is not None, "call significance_test() first"
+        assert self.monotonic_mask is not None, "call compute_spearman() first"
+        print(f"Significantly tuned neurons: #{self.significant_mask.sum()} \n {np.where(self.significant_mask)[0]}")
+
+        print(f"Positive tuned neurons: #{self.monotonic_mask['positive'].sum()} \n {np.where(self.monotonic_mask['positive'])[0]}")
+
+        print(f"Negative tuned neurons: #{self.monotonic_mask['negative'].sum()} \n {np.where(self.monotonic_mask['negative'])[0]}")
+
+        print(f"Non-monotonic tuned neurons: #{self.monotonic_mask['non-monotonic'].sum()} \n {np.where(self.monotonic_mask['non-monotonic'])[0]}")
 
 
-    def plot_significant_neurons(self, ax=None) -> plt.Axes:
-        """Highlight neurons that pass the significance test.
+# ------------- cross-stimulus comparison plots -------------
 
-        Useful formats: bar chart of p-values with threshold line, or a
-        scatter of significant vs. non-significant cells.
 
-        Parameters
-        ----------
-        ax : matplotlib.axes.Axes, optional
-            Axes to draw into. Creates a new one if None.
+def plot_monotonicity_stacked_bar(tunings: dict[str, SpeedTuning],
+                                   ax: plt.Axes = None,
+                                   colors: dict[str, str]| None = None, 
+                                   figsize=(5, 3.5)) -> plt.Axes:
+    """Stacked bar chart: for each stimulus, breakdown of significantly tuned
+    neurons by monotonicity (positive / negative / non-monotonic).
 
-        Returns
-        -------
-        plt.Axes
-            The axes that were drawn into.
-        """
-        raise NotImplementedError
+    Parameters
+    ----------
+    tunings : dict[str, SpeedTuning]
+        Mapping from stimulus label to SpeedTuning (must have
+        ``compute_spearman()`` called).
+    ax : plt.Axes, optional
+    colors : dict[str, str], optional
+        Category colours. Default: positive=#E74C3C (red),
+        negative=#3498DB (blue), non-monotonic=#95A5A6 (grey).
 
+    Returns
+    -------
+    plt.Axes
+    """
+    if ax is None:
+        _, ax = plt.subplots(figsize=figsize)
+
+    if colors is None:
+        colors = {'positive': '#E74C3C', 'negative': '#3498DB',
+                  'non-monotonic': '#95A5A6'}
+
+    labels = list(tunings.keys())
+    categories = ['positive', 'negative', 'non-monotonic']
+
+    # fraction of significant cells in each category, per stimulus
+    counts = {}
+    for lbl in labels:
+        t = tunings[lbl]
+        if t.significant_mask is None or t.significant_mask.sum() == 0:  
+            counts[lbl] = {c: 0.0 for c in categories}
+        else:
+            sig = t.significant_mask
+            n = sig.sum()
+            counts[lbl] = {c: t.monotonic_mask[c][sig].sum() 
+                            for c in categories}
+
+    x = np.arange(len(labels))
+    bottom = np.zeros(len(labels))
+
+    for cat in categories:
+        vals = [counts[l][cat] for l in labels]
+        ax.bar(x, vals, 0.55, bottom=bottom, label=cat,
+               color=colors[cat], edgecolor='white', linewidth=0.5)
+        bottom += vals
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.set_ylabel('# f significant neurons')
+    ax.legend(fontsize=8)
+    return ax
+
+
+def plot_rho_pairwise_scatter(tuning_a: SpeedTuning, tuning_b: SpeedTuning,
+                               label_a: str, label_b: str,
+                               ax: plt.Axes = None) -> plt.Axes:
+    """Scatter plot comparing Spearman *rho* across two stimulus conditions.
+
+    Points are coloured by joint significance and monotonicity:
+    significant in both with same direction / different direction,
+    significant in only one condition, or neither.
+
+    Parameters
+    ----------
+    tuning_a, tuning_b : SpeedTuning
+        Must have ``compute_spearman()`` called.
+    label_a, label_b : str
+        Axis labels.
+    ax : plt.Axes, optional
+
+    Returns
+    -------
+    plt.Axes
+    """
+    if ax is None:
+        _, ax = plt.subplots(figsize=(5, 5))
+
+    rho_a, rho_b = tuning_a.rho, tuning_b.rho
+    sig_a, sig_b = tuning_a.significant_mask, tuning_b.significant_mask
+    ma, mb = tuning_a.monotonic_mask, tuning_b.monotonic_mask
+
+    both = sig_a & sig_b
+    only_a = sig_a & ~sig_b
+    only_b = sig_b & ~sig_a
+    neither = ~sig_a & ~sig_b
+
+    # among both-significant: same monotonic direction?
+    same_dir = both & ((ma['positive'] & mb['positive']) |
+                       (ma['negative'] & mb['negative']))
+    diff_dir = both & ~same_dir
+
+    ax.scatter(rho_a[neither], rho_b[neither],
+               c='lightgray', s=10, label='neither', alpha=0.4)
+    ax.scatter(rho_a[only_a], rho_b[only_a],
+               c='#E74C3C', s=15, label=f'only {label_a}', alpha=0.7)
+    ax.scatter(rho_a[only_b], rho_b[only_b],
+               c='#3498DB', s=15, label=f'only {label_b}', alpha=0.7)
+    ax.scatter(rho_a[same_dir], rho_b[same_dir],
+               c='#2ECC71', s=20, label='both, same direction', alpha=0.8)
+    ax.scatter(rho_a[diff_dir], rho_b[diff_dir],
+               c='#F39C12', s=20, label='both, different', alpha=0.8)
+
+    # diagonal reference line
+    lim = max(np.nanmax(np.abs(rho_a)), np.nanmax(np.abs(rho_b)))
+    ax.plot([-lim, lim], [-lim, lim], 'k--', lw=0.6, alpha=0.3)
+    ax.axhline(0, color='gray', lw=0.5)
+    ax.axvline(0, color='gray', lw=0.5)
+    ax.set_xlabel(f'Spearman $\\rho$ ({label_a})')
+    ax.set_ylabel(f'Spearman $\\rho$ ({label_b})')
+    ax.legend(fontsize=7, loc='lower right')
+    ax.set_aspect('equal')
+    return ax
 
 
 # ==============================================================================
