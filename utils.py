@@ -646,7 +646,9 @@ class SpeedTuning:
 
 
     def compute_spearman(self, threshold = 0.05):
-        """Spearman rank correlation between response and running speed per cell, to test monotonicity of tuning.
+        """Spearman rank correlation between response and running speed per cell, to test monotonicity of tuning. 
+        
+        Note that only those neurons significantly tuned tested by :func:`significance_test` will be tested.
 
         Stores
         ------
@@ -669,9 +671,9 @@ class SpeedTuning:
         rho_p_values = res.pvalue[0, 1:]    # (n_cells,)
 
         # categorize monotonicity: increasing, decreasing, or non-monotonic but tuned
-        increasing = (rho > 0) & (rho_p_values < threshold)
-        decreasing = (rho < 0) & (rho_p_values < threshold)
-        non_monotonically = self.significant_mask & (rho_p_values > threshold)
+        increasing = (rho > 0) & (rho_p_values < threshold) & self.significant_mask
+        decreasing = (rho < 0) & (rho_p_values < threshold) & self.significant_mask
+        non_monotonically =  (rho_p_values > threshold) & self.significant_mask
 
         self.rho = rho
         self.rho_p_values = rho_p_values
