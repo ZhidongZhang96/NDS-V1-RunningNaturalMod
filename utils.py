@@ -141,11 +141,11 @@ class TrialData:
         Keys correspond to the stimulus table columns (excluding ``start``/``end``),
         e.g. ``"orientation"``, ``"temporal_frequency"``, ``"frame"``.
     """
-    stimulus: str | None = None
-    params: dict | None = None
-    responses: np.ndarray | None = None
-    running_speed: np.ndarray | None = None
-    time: np.ndarray | None = None
+    stimulus: str
+    params: dict
+    responses: np.ndarray
+    running_speed: np.ndarray
+    time: np.ndarray
     stimulus_params: dict | None = None
 
 
@@ -179,7 +179,6 @@ def extract_trials(
     """
     
     check_stim(stimulus)
-    trial_data = TrialData(stimulus=stimulus)
 
     if not response_window:
         if stimulus == "drifting_gratings":
@@ -189,8 +188,7 @@ def extract_trials(
         else:
             response_window = (5, 7)    # static_gratings / natural_scenes
     offset, duration = response_window
-
-    trial_data.params = {'offset': offset, 'duration': duration}
+    params: dict = {"offset": offset, "duration": duration}
 
     # ----- 1. Generate windows (branch-specific) -----
     if stimulus == "spontaneous":
@@ -208,6 +206,7 @@ def extract_trials(
                 t_start = epoch_start + offset + i * duration
                 t_end = t_start + duration
                 windows.append((session_key, t_start, t_end))
+        stimulus_params = None
     else:
         s_key = "A" if stimulus == "drifting_gratings" else "B"
         s = data["sessions"][s_key]
@@ -216,17 +215,17 @@ def extract_trials(
         # remove the blank-sweep trial, where the params are all NaN for gratings
         if stimulus == 'drifting_gratings':
             stim_tables = stim_tables[stim_tables['blank_sweep'] != 1].drop(columns=['blank_sweep'])
-        elif stimulus == 'natural_scenes': 
+        elif stimulus == 'natural_scenes':
             stim_tables = stim_tables[stim_tables['frame'] != -1]
-        elif stimulus == 'static_gratings': 
+        elif stimulus == 'static_gratings':
             stim_tables = stim_tables.dropna(subset=['orientation'])
-            
+
         trial_starts = np.array(stim_tables["start"]) + offset
         windows = [
             (s_key, int(start), int(start + duration))
             for start in trial_starts
         ]
-        trial_data.stimulus_params = {
+        stimulus_params = {
             col: stim_tables[col].to_numpy()
             for col in stim_tables.columns
             if col not in ["start", "end"]
@@ -242,11 +241,19 @@ def extract_trials(
         all_speeds.append(s["running_speed"][0, start:end])     # (duration,)
         all_times.append(s["t"][start:end])                      # (duration,)
 
-    trial_data.responses = np.stack(all_responses, axis=1)     # (n_cells, n_trials, duration)
-    trial_data.running_speed = np.stack(all_speeds, axis=0)    # (n_trials, duration)
-    trial_data.time = np.stack(all_times, axis=0)               # (n_trials, duration)
+    responses = np.stack(all_responses, axis=1)     # (n_cells, n_trials, duration)
+    running_speed = np.stack(all_speeds, axis=0)    # (n_trials, duration)
+    running_speed[running_speed < 0] = 0            # non-negative
+    time = np.stack(all_times, axis=0)               # (n_trials, duration)
 
-    return trial_data
+    return TrialData(
+        stimulus,
+        params,
+        responses,
+        running_speed,
+        time,
+        stimulus_params,
+    )
 
 
 # ==============================================================================
@@ -522,7 +529,21 @@ class SpeedTuning:
         p_values : np.ndarray, shape ``(n_cells,)``
         significant_mask : np.ndarray of bool, shape ``(n_cells,)``
         """
-        raise NotImplementedError
+        # the real tuning
+        vs_real = self.mean_all_responses.var(axis=1)   # (n_cells)
+        
+        # shuffled
+        vs_shuffled = []
+        for _ in range(n_shuffles):
+            shuffled_bins_masking = np.random.permutation(self.bins_masking)
+            _, _, mean_all_res = self._binned_responses(bins_masking=shuffled_bins_masking) # (n_cells, n_bins)
+            vs_shuffled.append(mean_all_res.var(axis=1))
+        vs_shuffled = np.array(vs_shuffled).T   # (n_cells, n_shuffles)
+
+        self.p_values = np.mean(vs_shuffled < vs_real[:, np.newaxis], axis=1)    # (n_cells)
+        self.significant_mask = self.p_values < threshold
+
+
 
     def compute_spearman(self):
         """Spearman rank correlation between response and running speed per cell.
