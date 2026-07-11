@@ -497,12 +497,13 @@ class SpeedTuning:
         self.label = label  # or ", ".join(k for k in self._td if k)
 
         self.n_bins = n_bins
-        self.responses: np.ndarray | None = None             # shape (n_cells, n_trials_total)
-        self.speeds: np.ndarray | None = None                # shape (n_trials_total,)
-        self.bins_masking: np.ndarray | None = None          # shape (n_trials_total,)
 
         # by compute_tuning()
+        self.responses: np.ndarray | None = None             # shape (n_cells, n_trials_total)
+        self.speeds: np.ndarray | None = None                # shape (n_trials_total,)
         self.bins_edges: np.ndarray | None = None            # shape (n_bins+1,)
+        self.bins_centers: np.ndarray | None = None            # shape (n_bins,)
+        self.bins_masking: np.ndarray | None = None          # shape (n_trials_total,)
         self.mean_all_responses: np.ndarray | None = None    # shape (n_cells, n_bins)
         self.mean_responses: np.ndarray | None = None        # shape (n_bins,)
         self.std_responses: np.ndarray | None = None         # shape (n_bins,)
@@ -520,7 +521,7 @@ class SpeedTuning:
             'non-monotonically': None
             }) 
         
-        
+
     # ------------- helpers -------------
 
     def _pooled(self):
@@ -566,6 +567,7 @@ class SpeedTuning:
         # bin the speed
         if self.bins_edges is None:
             bins_edges = np.linspace(self.speeds.min(), self.speeds.max()+1e-6, num=self.n_bins+1)
+            self.bins_centers = (bins_edges[:-1] + bins_edges[1:]) / 2
         else:
             bins_edges = self.bins_edges
         if bins_masking is None:
@@ -682,13 +684,13 @@ class SpeedTuning:
 
     # ------------- plotting -------------
 
-    def plot_tuning_curve(self, cell: int = None, ax=None) -> plt.Axes:
-        """Plot speed tuning curve(s).
+    def plot_tuning_curve(self, cells: list[int] | None = None, figsize=(5,3), semcolor = 'pink', ax=None) -> plt.Axes:
+        """Plot speed tuning curve with Mean and SEM over the given cells.
 
         Parameters
         ----------
-        cell : int or None, optional
-            If given, plot a single cell. Otherwise show all cells
+        cell : list[int] or None, optional
+            If given, plot the average of the given cells. Otherwise the average of all cells
             as a heatmap.
         ax : matplotlib.axes.Axes, optional
             Axes to draw into. Creates a new one if None.
@@ -698,6 +700,30 @@ class SpeedTuning:
         plt.Axes
             The axes that were drawn into.
         """
+        assert self.mean_all_responses is not None, "call compute_tuning() first"
+        assert self.bins_centers is not None, "call compute_tuning() first"
+
+        if ax == None:
+            _, ax = plt.subplots(figsize=figsize)
+
+        res_cells = self.mean_all_responses[cells] if cells else self.mean_all_responses
+        means = res_cells.mean(axis=0)     # (n_bins)
+        sem = res_cells.std(axis=0) / np.sqrt(res_cells.shape[0])
+        
+        ax.fill_between(self.bins_centers, means-sem, means+sem, color=semcolor, alpha=0.5, edgecolor='none')
+        if len(res_cells) == 1:
+            ax.plot(self.bins_centers, means, color='black', marker='o')
+        else:
+            ax.scatter(self.bins_centers, means, s=10, color='black')
+        
+        ax.set_xlabel('running speed (cm/s)')
+        ax.set_ylabel('average $\\Delta$F/F')
+
+        ax.set_ylim(bottom=0)
+        return ax
+
+    def plot_tuning_cells(self):
+        """Plot speed tuning for each given cells in a density map"""
         raise NotImplementedError
 
 
