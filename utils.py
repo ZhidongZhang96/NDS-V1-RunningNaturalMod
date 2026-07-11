@@ -507,14 +507,20 @@ class SpeedTuning:
         self.mean_responses: np.ndarray | None = None        # shape (n_bins,)
         self.std_responses: np.ndarray | None = None         # shape (n_bins,)
 
-        # filled by significance_test()
-        self.p_values: np.ndarray | None = None              # shape (n_cells,)
+        # by significance_test()
+        self.levene_p_values: np.ndarray | None = None       # shape (n_cells,)
         self.significant_mask: np.ndarray | None = None      # bool, shape (n_cells,)
 
-        # filled by compute_spearman()
+        # by compute_spearman()
         self.rho: np.ndarray | None = None                   # shape (n_cells,)
         self.rho_p_values: np.ndarray | None = None          # shape (n_cells,)
-
+        self.monotonical_mask : dict[str, np.ndarray | None] = dict({
+            'increasing': None, 
+            'decreasing': None, 
+            'non-monotonically': None
+            }) 
+        
+        
     # ------------- helpers -------------
 
     def _pooled(self):
@@ -538,6 +544,7 @@ class SpeedTuning:
             all_v.append(td.running_speed.mean(axis=-1))     # (n_trials,)
         return np.concatenate(all_r, axis=1), np.concatenate(all_v, axis=0)
 
+
     def _binned_responses(self, bins_masking=None):
         """Bin trials by ``bins_masking`` and average responses per bin.
 
@@ -553,6 +560,9 @@ class SpeedTuning:
         bins_masking : np.ndarray, shape ``(n_trials,)``
         mean_all_responses : np.ndarray, shape ``(n_cells, n_bins)``
         """
+        assert self.speeds is not None, "call compute_tuning() first"
+        assert self.responses is not None, "call compute_tuning() first"
+
         # bin the speed
         if self.bins_edges is None:
             bins_edges = np.linspace(self.speeds.min(), self.speeds.max()+1e-6, num=self.n_bins+1)
@@ -570,6 +580,7 @@ class SpeedTuning:
 
         return bins_edges, bins_masking, mean_all_responses
 
+
     # ------------- core computation -------------
 
     def compute_tuning(self):
@@ -586,7 +597,6 @@ class SpeedTuning:
         # compute the mean and std across cells
         self.mean_responses = self.mean_all_responses.mean(axis=0)
         self.std_responses = self.mean_all_responses.std(axis=0)
-
 
 
     def significance_test(self, n_shuffles: int = 1000, threshold: float = 0.05):
@@ -609,7 +619,7 @@ class SpeedTuning:
 
         Stores
         ------
-        p_values : np.ndarray, shape ``(n_cells,)``
+        levene_p_values : np.ndarray, shape ``(n_cells,)``
         significant_mask : np.ndarray of bool, shape ``(n_cells,)``
         """
         assert self.mean_all_responses is not None, "call compute_tuning() first"
@@ -632,15 +642,43 @@ class SpeedTuning:
         self.levene_p_values = p_values
         self.significant_mask = significant_mask
 
-    def compute_spearman(self):
-        """Spearman rank correlation between response and running speed per cell.
+
+    def compute_spearman(self, threshold = 0.05):
+        """Spearman rank correlation between response and running speed per cell, to test monotonicity of tuning.
 
         Stores
         ------
         rho : np.ndarray, shape ``(n_cells,)``
         rho_p_values : np.ndarray, shape ``(n_cells,)``
+        monotonical_mask : dict[str, np.array], with elements shape ``(n_cells,)``
         """
-        raise NotImplementedError
+        assert self.responses is not None, "call compute_tuning() first"
+        assert self.bins_masking is not None, "call compute_tuning() first"
+        assert self.significant_mask is not None, "call significance_test() first"
+
+        from scipy.stats import spearmanr
+        seq_speed = self.bins_masking   # (n_trials_total)
+        seq_responses = self.responses  # (n_cells, n_trials_total)
+
+        combined_mat = np.vstack([seq_speed, seq_responses])    # (1+n_cells, n_trials_total)
+        res = spearmanr(combined_mat, axis=1)
+
+        rho = res.statistic[0, 1:]          # (n_cells,)
+        rho_p_values = res.pvalue[0, 1:]    # (n_cells,)
+
+        # categorize monotonicity: increasing, decreasing, or non-monotonic but tuned
+        increasing = (rho > 0) & (rho_p_values < threshold)
+        decreasing = (rho < 0) & (rho_p_values < threshold)
+        non_monotonically = self.significant_mask & (rho_p_values > threshold)
+
+        self.rho = rho
+        self.rho_p_values = rho_p_values
+        self.monotonical_mask = {
+            'increasing': increasing,
+            'decreasing': decreasing,
+            'non-monotonically': non_monotonically
+        }
+
 
     # ------------- plotting -------------
 
@@ -662,6 +700,7 @@ class SpeedTuning:
         """
         raise NotImplementedError
 
+
     def plot_significant_neurons(self, ax=None) -> plt.Axes:
         """Highlight neurons that pass the significance test.
 
@@ -679,6 +718,7 @@ class SpeedTuning:
             The axes that were drawn into.
         """
         raise NotImplementedError
+
 
 
 # ==============================================================================
