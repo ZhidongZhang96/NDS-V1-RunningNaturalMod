@@ -625,10 +625,10 @@ class SpeedTuning:
         assert self.mean_all_responses is not None, "call compute_tuning() first"
         assert self.bins_masking is not None, "call compute_tuning() first"
 
-        # the real tuning
+        # the real tuning — variance across bins
         vs_real = self.mean_all_responses.var(axis=1)   # (n_cells)
 
-        # shuffled
+        # shuffled — permute bin labels, re-compute variance
         vs_shuffled = []
         for _ in range(n_shuffles):
             shuffled_bins_masking = np.random.permutation(self.bins_masking)
@@ -636,7 +636,7 @@ class SpeedTuning:
             vs_shuffled.append(mean_all_res.var(axis=1))
         vs_shuffled = np.array(vs_shuffled).T   # (n_cells, n_shuffles)
 
-        p_values = np.mean(vs_shuffled < vs_real[:, np.newaxis], axis=1)    # (n_cells) ()
+        p_values = np.mean(vs_shuffled >= vs_real[:, np.newaxis], axis=1)    # (n_cells)
         significant_mask = p_values < threshold
 
         self.levene_p_values = p_values
