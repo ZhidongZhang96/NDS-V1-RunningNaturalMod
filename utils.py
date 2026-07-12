@@ -817,7 +817,7 @@ class EncodingModel:
             self._V = self._td.running_speed.mean(axis=1)
         return self._V
 
-    def _build_design(self, cell, model="full"):
+    def _build_design(self, cell, model="full", fhat=None):
         """Assemble the design matrix for one cell and one nested model.
 
         Columns are ``[f̂(S), drift(n_basis), (V), (V·f̂(S))]``, with the
@@ -832,30 +832,117 @@ class EncodingModel:
         already spans the constant, so ``β₀(t) = Σⱼ bⱼ φⱼ(t)`` is the
         (time-varying) baseline; a constant column would be collinear with it.
 
+        Parameters
+        ----------
+        fhat : np.ndarray, optional
+            A ``(n_cells, n_trials)`` stimulus-mean array to use instead of the
+            cached all-trial :meth:`_stimulus_mean`. Pass the training-fold
+            f̂(S) during cross-validation (:meth:`fit_all`) so the R² stays
+            leakage-free.
+
         Returns ``(n_trials, n_features)``.
         """
         assert model in ("null", "add", "mult", "full"), f"unknown model: {model}"
-        fhat = self._stimulus_mean()[cell]                 # (n_trials,)
+        fhat_cell = (self._stimulus_mean() if fhat is None else fhat)[cell]
         drift = self._drift_basis()                        # (n_trials, n_basis)
         V = self._running_speed()                          # (n_trials,)
-        cols = [fhat[:, None], drift]
+        cols = [fhat_cell[:, None], drift]
         if model in ("add", "full"):
             cols.append(V[:, None])
         if model in ("mult", "full"):
-            cols.append((V * fhat)[:, None])
+            cols.append((V * fhat_cell)[:, None])
         return np.column_stack(cols)
 
-    def fit_all(self):
-        """Fit all four models for every neuron.
+    def _fold_stimulus_mean(self, R, labels, train_idx):
+        """f̂(S) computed from TRAIN trials only, mapped to every trial.
+
+        Returns ``(n_cells, n_trials)``: each trial is assigned the mean (over
+        *training* trials) of its stimulus condition, per cell. Conditions with
+        no training trials fall back to the per-cell training grand mean. Used
+        inside :meth:`fit_all` so the cross-validated Null R² is not optimistic.
+        """
+        train_mask = np.zeros(R.shape[1], dtype=bool)
+        train_mask[train_idx] = True
+        fhat = np.empty_like(R)
+        grand = R[:, train_mask].mean(axis=1, keepdims=True)   # (n_cells, 1)
+        for c in np.unique(labels):
+            cond = labels == c
+            tr = cond & train_mask
+            fhat[:, cond] = R[:, tr].mean(axis=1, keepdims=True) if tr.any() else grand
+        return fhat
+
+    @staticmethod
+    def _pooled_r2(y, yhat):
+        """Pooled coefficient of determination per cell.
+
+        ``y`` and ``yhat`` are ``(n_cells, n_trials)``; returns ``(n_cells,)``
+        ``1 − Σ(y−ŷ)² / Σ(y−ȳ)²`` with ``ȳ`` the per-cell grand mean. Negative
+        values mean the model predicts held-out data worse than the mean.
+        """
+        ss_res = ((y - yhat) ** 2).sum(axis=1)
+        ss_tot = ((y - y.mean(axis=1, keepdims=True)) ** 2).sum(axis=1)
+        return 1.0 - ss_res / ss_tot
+
+    def fit_all(self, n_folds=5, alphas=None, random_state=0):
+        """Fit all four nested models per neuron with cross-validated R².
+
+        Each neuron is fit by ridge regression (standardized features, λ chosen
+        by :class:`sklearn.linear_model.RidgeCV`) under ``n_folds``-fold
+        cross-validation. The stimulus mean f̂(S) is recomputed from the
+        *training* trials of every fold (:meth:`_fold_stimulus_mean`), so the
+        stored R² is a genuine out-of-fold prediction score that the Null model
+        cannot inflate by memorising per-condition means.
+
+        Parameters
+        ----------
+        n_folds : int, optional
+            Number of cross-validation folds, by default 5.
+        alphas : array-like, optional
+            Ridge penalties to search; defaults to ``np.logspace(-3, 3, 13)``.
+        random_state : int, optional
+            Seed for the fold split, by default 0.
 
         Stores
         ------
-        r2_null : np.ndarray, shape ``(n_cells,)``
-        r2_add : np.ndarray, shape ``(n_cells,)``
-        r2_mult : np.ndarray, shape ``(n_cells,)``
-        r2_full : np.ndarray, shape ``(n_cells,)``
+        r2_null, r2_add, r2_mult, r2_full : np.ndarray, shape ``(n_cells,)``
+            Pooled cross-validated R² of each nested model (may be negative).
+
+        Notes
+        -----
+        For ``spontaneous`` there is a single stimulus condition, so f̂(S) is
+        constant and the multiplicative term ``V·f̂(S) ∝ V``; ``r2_mult`` then
+        coincides with ``r2_add`` (ridge tolerates the collinearity).
         """
-        raise NotImplementedError
+        from sklearn.linear_model import RidgeCV
+        from sklearn.preprocessing import StandardScaler
+        from sklearn.pipeline import Pipeline
+        from sklearn.model_selection import KFold
+
+        if alphas is None:
+            alphas = np.logspace(-3, 3, 13)
+
+        R = self._trial_response()                 # (n_cells, n_trials) targets
+        labels = self._condition_labels()          # (n_trials,)
+        n_cells, n_trials = R.shape
+        models = ("null", "add", "mult", "full")
+        yhat = {m: np.empty_like(R) for m in models}
+
+        kf = KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+        for train_idx, test_idx in kf.split(np.arange(n_trials)):
+            fhat = self._fold_stimulus_mean(R, labels, train_idx)   # train-only f̂(S)
+            for model in models:
+                for cell in range(n_cells):
+                    X = self._build_design(cell, model, fhat=fhat)
+                    pipe = Pipeline([
+                        ("scale", StandardScaler()),
+                        ("ridge", RidgeCV(alphas=alphas)),
+                    ])
+                    pipe.fit(X[train_idx], R[cell, train_idx])
+                    yhat[model][cell, test_idx] = pipe.predict(X[test_idx])
+
+        for model in models:
+            setattr(self, f"r2_{model}", self._pooled_r2(R, yhat[model]))
+        return self
 
     def r2_decomposition(self):
         """Compute :math:`\\Delta R^2` for each term relative to the null model.
