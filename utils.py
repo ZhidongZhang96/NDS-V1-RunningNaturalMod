@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from dataclasses import dataclass
 
+N_CELLS = 47
 STIMULI = ['drifting_gratings', 'static_gratings', 'natural_scenes', 'spontaneous']
 def check_stim(stimulus:str):
     assert stimulus in STIMULI, f"You must choose one of the stimulus type: {STIMULI}"
@@ -641,7 +642,7 @@ class SpeedTuning:
         self.significant_mask = significant_mask
 
 
-    def compute_spearman(self, threshold = 0.05):
+    def compute_spearman(self, rho_threshold=0, p_threshold = 0.05):
         """Spearman rank correlation between response and running speed per cell, to test monotonicity of tuning. 
         
         Note that only those neurons significantly tuned tested by :func:`significance_test` will be tested.
@@ -667,10 +668,12 @@ class SpeedTuning:
         rho_p_values = res.pvalue[0, 1:]    # (n_cells,)
 
         # categorize monotonicity: positive, negative, or non-monotonic but tuned
+        masking = (rho_p_values < p_threshold) & (np.abs(rho) >= rho_threshold)
+
         monotonic_mask = {
-            'positive': (rho > 0) & (rho_p_values < threshold) & self.significant_mask,
-            'negative': (rho < 0) & (rho_p_values < threshold) & self.significant_mask,
-            'non-monotonic': (rho_p_values > threshold) & self.significant_mask
+            'positive': (rho > 0) & masking & self.significant_mask,
+            'negative': (rho < 0) & masking & self.significant_mask,
+            'non-monotonic': (rho_p_values > p_threshold) & self.significant_mask
         }
 
         self.rho = rho
@@ -724,10 +727,13 @@ class SpeedTuning:
         print(f"Significantly tuned neurons: #{self.significant_mask.sum()} \n {np.where(self.significant_mask)[0]}")
 
         print(f"Positive tuned neurons: #{self.monotonic_mask['positive'].sum()} \n {np.where(self.monotonic_mask['positive'])[0]}")
+        print(self.rho[self.monotonic_mask['positive']])
 
         print(f"Negative tuned neurons: #{self.monotonic_mask['negative'].sum()} \n {np.where(self.monotonic_mask['negative'])[0]}")
+        print(self.rho[self.monotonic_mask['negative']])
 
         print(f"Non-monotonic tuned neurons: #{self.monotonic_mask['non-monotonic'].sum()} \n {np.where(self.monotonic_mask['non-monotonic'])[0]}")
+        print(self.rho[self.monotonic_mask['non-monotonic']])
 
 
 # ------------- cross-stimulus comparison plots -------------
@@ -826,9 +832,9 @@ def plot_rho_pairwise_scatter(tuning_a: SpeedTuning, tuning_b: SpeedTuning,
     neither = ~sig_a & ~sig_b
 
     # among both-significant: same monotonic direction?
-    same_dir = both & ((ma['positive'] & mb['positive']) |
-                       (ma['negative'] & mb['negative']))
-    diff_dir = both & ~same_dir
+    # same_dir = both & ((ma['positive'] & mb['positive']) |
+    #                    (ma['negative'] & mb['negative']))
+    # diff_dir = both & ~same_dir
 
     ax.scatter(rho_a[neither], rho_b[neither],
                c='lightgray', s=10, label='neither', alpha=0.4)
@@ -836,10 +842,13 @@ def plot_rho_pairwise_scatter(tuning_a: SpeedTuning, tuning_b: SpeedTuning,
                c='#E74C3C', s=15, label=f'only {label_a}', alpha=0.7)
     ax.scatter(rho_a[only_b], rho_b[only_b],
                c='#3498DB', s=15, label=f'only {label_b}', alpha=0.7)
-    ax.scatter(rho_a[same_dir], rho_b[same_dir],
-               c='#2ECC71', s=20, label='both, same direction', alpha=0.8)
-    ax.scatter(rho_a[diff_dir], rho_b[diff_dir],
-               c='#F39C12', s=20, label='both, different', alpha=0.8)
+    
+    ax.scatter(rho_a[both], rho_b[both],
+            c='#2ECC71', s=20, label='both', alpha=0.8)
+    # ax.scatter(rho_a[same_dir], rho_b[same_dir],
+    #            c='#2ECC71', s=20, label='both, same direction', alpha=0.8)
+    # ax.scatter(rho_a[diff_dir], rho_b[diff_dir],
+    #            c='#F39C12', s=20, label='both, different', alpha=0.8)
 
     # diagonal reference line
     lim = max(np.nanmax(np.abs(rho_a)), np.nanmax(np.abs(rho_b)))
