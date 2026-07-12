@@ -973,7 +973,44 @@ class EncodingModel:
     def plot_r2_decomposition(self, ax=None) -> plt.Figure:
         """Visualise the :math:`\\Delta R^2` breakdown across the population.
 
-        Suggested format: grouped box plot or violin plot with one group
-        per model (Add / Mult / Full), possibly split by stimulus type.
+        Draws a violin (with the median) plus jittered per-cell points for the
+        three nested terms — :math:`\\Delta R^2_{\\text{add}}`,
+        :math:`\\Delta R^2_{\\text{mult}}`, :math:`\\Delta R^2_{\\text{full}}` —
+        for this instance's stimulus. Pass ``ax`` to draw one stimulus per panel
+        of a shared figure (e.g. a gratings-vs-natural comparison).
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes, optional
+            Axis to draw into; a new figure/axis is created if omitted.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+
+        Raises
+        ------
+        RuntimeError
+            If :meth:`fit_all` has not been run yet.
         """
-        raise NotImplementedError
+        delta_add, delta_mult, delta_full = self.r2_decomposition()
+        series = [delta_add, delta_mult, delta_full]
+        labels = [r"$\Delta R^2_{add}$", r"$\Delta R^2_{mult}$", r"$\Delta R^2_{full}$"]
+
+        if ax is None:
+            _, ax = plt.subplots(figsize=(4, 3.5))
+        positions = np.arange(1, len(series) + 1)
+        vp = ax.violinplot(series, positions=positions, showmedians=True,
+                           showextrema=False)
+        for body in vp["bodies"]:
+            body.set_alpha(0.35)
+        rng = np.random.default_rng(0)
+        for pos, d in zip(positions, series):
+            ax.scatter(rng.normal(pos, 0.04, size=len(d)), d,
+                       s=8, alpha=0.4, color="k", zorder=3)
+        ax.axhline(0, color="0.5", lw=0.8, ls="--")
+        ax.set_xticks(positions)
+        ax.set_xticklabels(labels)
+        ax.set_ylabel(r"$\Delta R^2$ (cross-validated)")
+        ax.set_title(self._td.stimulus)
+        return ax.figure
