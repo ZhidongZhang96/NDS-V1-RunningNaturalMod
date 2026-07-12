@@ -6,6 +6,9 @@ from dataclasses import dataclass
 
 N_CELLS = 47
 STIMULI = ['drifting_gratings', 'static_gratings', 'natural_scenes', 'spontaneous']
+SHORT_STIM = ['dg', 'sg', 'ns', 'spont']
+
+
 def check_stim(stimulus:str):
     assert stimulus in STIMULI, f"You must choose one of the stimulus type: {STIMULI}"
 
@@ -719,7 +722,7 @@ class SpeedTuning:
 
     # ------------- plotting & printing -------------
 
-    def plot_tuning_curve(self, cells: list[int] | None = None, figsize=(5,3), semcolor = 'pink', ax=None) -> plt.Axes:
+    def plot_tuning_curve(self, cells: list[int] | None = None, figsize=(5,3), semcolor=None, label=None, ax=None) -> plt.Axes:
         """Plot speed tuning curve with Mean and SEM over the given cells.
 
         Parameters
@@ -745,7 +748,7 @@ class SpeedTuning:
         means = res_cells.mean(axis=0)     # (n_bins)
         sem = res_cells.std(axis=0) / np.sqrt(res_cells.shape[0])
         
-        ax.fill_between(self.bins_centers, means-sem, means+sem, color=semcolor, alpha=0.5, edgecolor='none')
+        ax.fill_between(self.bins_centers, means-sem, means+sem, color=semcolor, alpha=0.5, edgecolor='none', label=label)
         if len(res_cells) == 1:
             ax.plot(self.bins_centers, means, color='black', marker='o')
         else:
@@ -760,15 +763,15 @@ class SpeedTuning:
     def print_tuned_cells(self):
         assert self.significant_mask is not None, "call significance_test() first"
         assert self.monotonic_mask is not None, "call compute_spearman() first"
-        print(f"Significantly tuned neurons: #{self.significant_mask.sum()} \n {np.where(self.significant_mask)[0]}")
+        print(f"Significantly tuned neurons: #{self.significant_mask.sum()} \n {np.where(self.significant_mask)[0] + 1}")
 
-        print(f"Positive tuned neurons: #{self.monotonic_mask['positive'].sum()} \n {np.where(self.monotonic_mask['positive'])[0]}")
+        print(f"Positive tuned neurons: #{self.monotonic_mask['positive'].sum()} \n {np.where(self.monotonic_mask['positive'])[0] + 1}")
         print(self.rho[self.monotonic_mask['positive']])
 
-        print(f"Negative tuned neurons: #{self.monotonic_mask['negative'].sum()} \n {np.where(self.monotonic_mask['negative'])[0]}")
+        print(f"Negative tuned neurons: #{self.monotonic_mask['negative'].sum()} \n {np.where(self.monotonic_mask['negative'])[0] + 1}")
         print(self.rho[self.monotonic_mask['negative']])
 
-        print(f"Non-monotonic tuned neurons: #{self.monotonic_mask['non-monotonic'].sum()} \n {np.where(self.monotonic_mask['non-monotonic'])[0]}")
+        print(f"Non-monotonic tuned neurons: #{self.monotonic_mask['non-monotonic'].sum()} \n {np.where(self.monotonic_mask['non-monotonic'])[0] + 1}")
         print(self.rho[self.monotonic_mask['non-monotonic']])
 
 
@@ -804,7 +807,7 @@ def plot_monotonicity_stacked_bar(tunings: dict[str, SpeedTuning],
                   'non-monotonic': '#95A5A6'}
 
     labels = list(tunings.keys())
-    categories = ['positive', 'negative', 'non-monotonic']
+    categories = ['non-monotonic', 'negative', 'positive']
 
     # fraction of significant cells in each category, per stimulus
     counts = {}
@@ -873,14 +876,14 @@ def plot_rho_pairwise_scatter(tuning_a: SpeedTuning, tuning_b: SpeedTuning,
     # diff_dir = both & ~same_dir
 
     ax.scatter(rho_a[neither], rho_b[neither],
-               c='lightgray', s=10, label='neither', alpha=0.4)
+               c='gray', s=10, label='neither tuned', alpha=0.7)
     ax.scatter(rho_a[only_a], rho_b[only_a],
                c='#E74C3C', s=15, label=f'only {label_a}', alpha=0.7)
     ax.scatter(rho_a[only_b], rho_b[only_b],
                c='#3498DB', s=15, label=f'only {label_b}', alpha=0.7)
     
     ax.scatter(rho_a[both], rho_b[both],
-            c='#2ECC71', s=20, label='both', alpha=0.8)
+            c='#2ECC71', s=20, label='both tuned', alpha=0.8)
     # ax.scatter(rho_a[same_dir], rho_b[same_dir],
     #            c='#2ECC71', s=20, label='both, same direction', alpha=0.8)
     # ax.scatter(rho_a[diff_dir], rho_b[diff_dir],
@@ -891,11 +894,139 @@ def plot_rho_pairwise_scatter(tuning_a: SpeedTuning, tuning_b: SpeedTuning,
     ax.plot([-lim, lim], [-lim, lim], 'k--', lw=0.6, alpha=0.3)
     ax.axhline(0, color='gray', lw=0.5)
     ax.axvline(0, color='gray', lw=0.5)
-    ax.set_xlabel(f'Spearman $\\rho$ ({label_a})')
-    ax.set_ylabel(f'Spearman $\\rho$ ({label_b})')
+    ax.set_xlabel(f'$\\rho$ ({label_a})')
+    ax.set_ylabel(f'$\\rho$ ({label_b})')
+    ax.set_title('Spearman $\\rho$ to running speed of cells')
     ax.legend(fontsize=7, loc='lower right')
     ax.set_aspect('equal')
     return ax
+
+
+def plot_monotonicity_grid(tunings: dict[str, SpeedTuning],
+                            responsive: dict[str, np.ndarray] | None = None,
+                            figsize=(6, 10)) -> plt.Figure:
+    """Grid heatmap: speed-tuning monotonicity per cell × stimulus.
+
+    Each row is one cell, each column one stimulus type.
+      - **Background** (green) = cell is visually responsive to that stimulus.
+      - **Text** (ρ value, coloured) = speed-tuning monotonicity for those
+        cells that are significantly speed-tuned:
+        red = positive, blue = negative, grey = non-monotonic.
+      - No text = not significantly speed-tuned.
+      - White background = not visually responsive to that stimulus.
+
+    Parameters
+    ----------
+    tunings : dict[str, SpeedTuning]
+        Mapping from stimulus label to SpeedTuning (must have
+        ``compute_spearman()`` called).
+    responsive : dict[str, np.ndarray] or None, optional
+        Mapping from stimulus label to a bool array of shape ``(n_cells,)``
+        indicating whether each cell shows a significant visual response to
+        that stimulus (e.g. from Allen SDK p_dg/p_sg/p_ns < 0.05).
+        Stimuli not present in the dict (e.g. ``spontaneous``) are treated
+        as responsive.  If ``None``, all cells are treated as responsive.
+    figsize : tuple, optional
+        Figure size.
+
+    Returns
+    -------
+    plt.Figure
+    """
+    labels = list(tunings.keys())[:-1]  # ignore the 'spont'
+    n_stim = len(labels)
+
+    # --- Responsiveness background ---
+    # 0 = not responsive, 1 = responsive
+    resp_code = np.ones((N_CELLS, n_stim), dtype=float)
+    if responsive is not None:
+        for j, lbl in enumerate(labels):
+            if lbl in responsive:
+                resp_code[:, j] = np.where(responsive[lbl], 1.0, 0.0)
+
+    # --- Monotonicity code for text colour ---
+    # 0 = not significant, 1 = negative, 2 = non-monotonic, 3 = positive
+    mono_code = np.zeros((N_CELLS, n_stim), dtype=int)
+    for j, lbl in enumerate(labels):
+        t = tunings[lbl]
+        sig = t.significant_mask
+        mono = t.monotonic_mask
+        for i in range(N_CELLS):
+            if not sig[i]:
+                mono_code[i, j] = 0
+            elif mono['positive'][i]:
+                mono_code[i, j] = 3
+            elif mono['negative'][i]:
+                mono_code[i, j] = 1
+            elif mono['non-monotonic'][i]:
+                mono_code[i, j] = 2
+
+    mono_colors = {
+        0: '#f0f0f0',   # not significant (invisible text)
+        1: '#3498DB',   # negative
+        2: '#95A5A6',   # non-monotonic
+        3: '#E74C3C',   # positive
+    }
+
+    # --- Sort rows: by #responsive (desc), then monotonicity pattern, then |rho| ---
+    # Remap mono_code so that 0 (not speed-tuned) sorts last
+    sort_mono = np.where(mono_code == 0, 9, mono_code)  # 9 > 1,2,3
+    n_resp = resp_code.sum(axis=1)                     # (n_cells,)
+    # mean |rho| across stimuli (0 for non-speed-tuned cells)
+    mean_abs_rho = np.zeros(N_CELLS)
+    for j, lbl in enumerate(labels):
+        t = tunings[lbl]
+        arho = np.abs(t.rho)
+        arho[~t.significant_mask] = 0.0
+        mean_abs_rho += arho
+    mean_abs_rho /= n_stim
+    order = np.lexsort(
+        tuple(sort_mono[:, j] for j in range(n_stim)) + (-mean_abs_rho, -n_resp,)
+    )
+    resp_code = resp_code[order]
+    mono_code = mono_code[order]
+    cell_labels = order + 1  # 1-based original cell IDs, now sorted
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Layer 1: responsiveness background (green = responsive)
+    cmap_resp = plt.matplotlib.colors.ListedColormap(['#ffffff', '#d5f5e3'])
+    ax.imshow(resp_code, aspect='auto', cmap=cmap_resp, vmin=-0.5, vmax=1.5,
+              interpolation='nearest')
+
+    # Layer 2: text — Spearman ρ, colour-coded by monotonicity
+    for i in range(N_CELLS):
+        ci = order[i]  # original cell index
+        for j in range(n_stim):
+            t = tunings[labels[j]]
+            val = t.rho[ci]
+            sig = t.significant_mask[ci]
+            txt = f'{val:.2f}' if sig else ''
+            c = mono_colors[mono_code[i, j]]
+            ax.text(j, i, txt, ha='center', va='center',
+                    fontsize=10, color=c, fontweight='bold')
+
+    ax.set_xticks(range(n_stim))
+    ax.set_xticklabels(labels, ha='right') # rotation=30, 
+    ax.set_yticks(np.arange(N_CELLS))
+    ax.set_yticklabels(cell_labels)
+    ax.set_ylabel('cell #')
+    ax.set_title('Speed-tuning monotonicity') # per cell × stimulus
+
+    # legend
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor='#d5f5e3', label='responsive to stimulus'),
+        Patch(facecolor='#ffffff', label='not responsive'),
+        Patch(facecolor='#E74C3C', label='positive monotonic'),
+        Patch(facecolor='#3498DB', label='negative monotonic'),
+        Patch(facecolor='#95A5A6', label='non-monotonic'),
+    ]
+    ax.legend(handles=legend_elements, loc='upper left',
+              bbox_to_anchor=(1.02, 1), fontsize=10, frameon=False)
+
+    fig.tight_layout()
+    return fig
 
 
 # ==============================================================================
