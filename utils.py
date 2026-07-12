@@ -675,6 +675,33 @@ class BinaryModulation:
 # ==============================================================================
 
 
+def tent_basis(x, centers):
+    """Triangular ("tent") basis functions evaluated at ``x``.
+
+    Each basis function peaks at 1 on its center and decays linearly to 0 at
+    the neighbouring centers, so adjacent tents form a partition of unity
+    between their centers. Ported from the V1Locomotion ``tent_basis.m``.
+
+    Parameters
+    ----------
+    x : array-like, shape ``(N,)``
+        Coordinates at which to evaluate the basis (e.g. per-trial time).
+    centers : array-like, shape ``(M,)``
+        Basis-function centers (knots), assumed evenly spaced.
+
+    Returns
+    -------
+    np.ndarray, shape ``(N, M)``
+        Basis matrix; row ``n`` holds the ``M`` tent values at ``x[n]``.
+    """
+    x = np.asarray(x, dtype=float).reshape(-1, 1)              # (N, 1)
+    centers = np.asarray(centers, dtype=float).reshape(1, -1)  # (1, M)
+    if centers.shape[1] == 1:
+        return np.ones((x.shape[0], 1))
+    dscale = np.diff(centers.ravel()).mean()                   # uniform knot spacing
+    return np.maximum(1.0 - np.abs(x - centers) / dscale, 0.0)
+
+
 class EncodingModel:
     """Fit and compare nested linear models of running-speed modulation.
 
@@ -712,6 +739,111 @@ class EncodingModel:
         self.r2_add = None            # np.ndarray, shape (n_cells,)
         self.r2_mult = None           # np.ndarray, shape (n_cells,)
         self.r2_full = None           # np.ndarray, shape (n_cells,)
+        # cached design pieces, filled lazily by the _* helpers below
+        self._fhat = None             # (n_cells, n_trials)
+        self._drift = None            # (n_trials, n_basis)
+        self._V = None                # (n_trials,)
+
+    # ------------- design-matrix construction (C1–C4) -------------
+
+    def _trial_response(self):
+        """Per-trial scalar response: mean ΔF/F over the response window.
+
+        Returns ``(n_cells, n_trials)``.
+        """
+        return self._td.responses.mean(axis=2)
+
+    def _condition_labels(self):
+        """Integer condition label per trial from ``stimulus_params``.
+
+        The condition is the unique combination of every stimulus parameter
+        (dg: orientation×TF; sg: orientation×SF×phase; ns: frame). For
+        ``spontaneous`` (no params) all trials share a single condition.
+
+        Returns ``(n_trials,)`` int array.
+        """
+        sp = self._td.stimulus_params
+        n_trials = self._td.responses.shape[1]
+        if not sp:
+            return np.zeros(n_trials, dtype=int)
+        cols = np.column_stack([np.asarray(v, dtype=float) for v in sp.values()])
+        _, labels = np.unique(cols, axis=0, return_inverse=True)
+        return labels
+
+    def _stimulus_mean(self):
+        """f̂(S): per-cell mean response of each trial's stimulus condition.
+
+        Implements Plan.md's ``f(S)`` = "the average response to the stimulus":
+        every trial is mapped to its condition's per-cell mean. Cached.
+
+        Returns ``(n_cells, n_trials)``.
+
+        Note
+        ----
+        Uses the plain condition mean over all trials. For cross-validated
+        R² (C6) recompute f̂(S) from *training* trials inside each fold to
+        avoid an optimistic Null R².
+        """
+        if self._fhat is None:
+            R = self._trial_response()
+            labels = self._condition_labels()
+            fhat = np.empty_like(R)
+            for c in np.unique(labels):
+                m = labels == c
+                fhat[:, m] = R[:, m].mean(axis=1, keepdims=True)
+            self._fhat = fhat
+        return self._fhat
+
+    def _drift_basis(self):
+        """Slow-drift design: ``n_basis`` tent functions over trial time.
+
+        Returns ``(n_trials, n_basis)``, shared across cells. Cached.
+        """
+        if self._drift is None:
+            t = self._td.time.mean(axis=1)                 # per-trial time (s)
+            centers = np.linspace(t.min(), t.max(), self._n_basis)
+            self._drift = tent_basis(t, centers)
+        return self._drift
+
+    def _running_speed(self):
+        """V: per-trial mean running speed.
+
+        Returns ``(n_trials,)``. Cached. Note ``extract_trials`` does not
+        clamp speed, so V may contain small negative values (tracking noise);
+        the linear model handles them fine, but clamp in preprocessing if you
+        want strictly non-negative speeds.
+        """
+        if self._V is None:
+            self._V = self._td.running_speed.mean(axis=1)
+        return self._V
+
+    def _build_design(self, cell, model="full"):
+        """Assemble the design matrix for one cell and one nested model.
+
+        Columns are ``[f̂(S), drift(n_basis), (V), (V·f̂(S))]``, with the
+        running columns included per ``model``:
+
+        - ``"null"`` : f̂(S), drift
+        - ``"add"``  : + V            (additive running term)
+        - ``"mult"`` : + V·f̂(S)      (multiplicative gain, linearized)
+        - ``"full"`` : + V + V·f̂(S)
+
+        No separate intercept column: the partition-of-unity tent basis
+        already spans the constant, so ``β₀(t) = Σⱼ bⱼ φⱼ(t)`` is the
+        (time-varying) baseline; a constant column would be collinear with it.
+
+        Returns ``(n_trials, n_features)``.
+        """
+        assert model in ("null", "add", "mult", "full"), f"unknown model: {model}"
+        fhat = self._stimulus_mean()[cell]                 # (n_trials,)
+        drift = self._drift_basis()                        # (n_trials, n_basis)
+        V = self._running_speed()                          # (n_trials,)
+        cols = [fhat[:, None], drift]
+        if model in ("add", "full"):
+            cols.append(V[:, None])
+        if model in ("mult", "full"):
+            cols.append((V * fhat)[:, None])
+        return np.column_stack(cols)
 
     def fit_all(self):
         """Fit all four models for every neuron.
