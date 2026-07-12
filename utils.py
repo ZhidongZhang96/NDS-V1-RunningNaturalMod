@@ -955,8 +955,18 @@ class EncodingModel:
             :math:`R^2_{\\text{mult}} - R^2_{\\text{null}}`
         delta_full : np.ndarray, shape ``(n_cells,)``
             :math:`R^2_{\\text{full}} - R^2_{\\text{null}}`
+
+        Raises
+        ------
+        RuntimeError
+            If :meth:`fit_all` has not been run yet.
         """
-        raise NotImplementedError
+        if self.r2_null is None:
+            raise RuntimeError("call fit_all() before r2_decomposition()")
+        delta_add = self.r2_add - self.r2_null
+        delta_mult = self.r2_mult - self.r2_null
+        delta_full = self.r2_full - self.r2_null
+        return delta_add, delta_mult, delta_full
 
     # ------------- plotting -------------
 
