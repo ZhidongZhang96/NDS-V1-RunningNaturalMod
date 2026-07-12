@@ -46,7 +46,7 @@ Full :        + β_add · V(t) + β_mult · [ V(t) · f̂_i(S) ]
 - **Ridge regression** per neuron: `Pipeline(StandardScaler, RidgeCV(alphas=logspace(-3,3,13)))`; features standardised, penalty λ selected by RidgeCV. Ridge is required because the Full model's terms are partly collinear and because it curbs the extra-parameter overfitting that would otherwise let Full win trivially.
 - **5-fold cross-validation** (`KFold`, shuffled, seed 0). Within each fold, **f̂(S) is recomputed from training trials only** (`_fold_stimulus_mean`); this is essential — using the all-trial mean would let the Null model memorise per-condition means and inflate every R².
 - **Cross-validated R²** (pooled out-of-fold): `R² = 1 − Σ_t (y − ŷ_cv)² / Σ_t (y − ȳ)²`, per neuron. R² < 0 is admissible and meaningful (model predicts worse than the mean).
-- **ΔR²_x = R²_x − R²_null** for x ∈ {add, mult, full} (`r2_decomposition`, to be added).
+- **ΔR²_x = R²_x − R²_null** for x ∈ {add, mult, full} (`r2_decomposition`).
 
 ## 4. Statistical inference (population level)
 
@@ -75,21 +75,42 @@ Full :        + β_add · V(t) + β_mult · [ V(t) · f̂_i(S) ]
 | ΔR²_mult(ns) ≈ or > gratings | **Novel result** — running modulates natural-scene coding comparably/distinctly; aligns with Froudarakis's state-dependence prediction and refines the grating-specific view. |
 | spont ΔR²_add > 0 | Running modulates stimulus-independent baseline activity. |
 
-The headline deliverable is the gratings-vs-natural contrast of ΔR²_mult (and ΔR²_full), with spontaneous as baseline — one figure/table, comparability caveats stated (§8).
+The headline deliverable is the gratings-vs-natural contrast of ΔR²_mult (and ΔR²_full), with spontaneous as baseline — one figure/table, comparability caveats stated (§9).
 
-## 7. Validation & controls
+## 7. Results (observed on the current data)
+
+Fitted with `EncodingModel(td, n_basis=5).fit_all()` per stimulus (47 matched cells); arrays saved to `data/encoding_r2.npz`. Medians across cells; one-sided Wilcoxon signed-rank vs 0.
+
+| stimulus | ΔR²_add | ΔR²_mult | ΔR²_full | cells ΔR²_full > 0 |
+|---|---|---|---|---|
+| drifting_gratings | +0.0012 (p=.002) | +0.0020 (p=.029) | +0.0075 (p=.003) | 70 % |
+| static_gratings | +0.0010 (p=3e-8) | −0.0003 (p=.32, n.s.) | +0.0005 (p=.064, n.s.) | 55 % |
+| natural_scenes | +0.0033 (p=2e-11) | +0.0031 (p=2e-4) | +0.0039 (p=3e-6) | 74 % |
+| spontaneous | +0.0009 (p=.011) | +0.0009 (p=.011) † | +0.0002 (p=.018) | 57 % |
+
+† spontaneous has a single condition ⇒ Mult ≡ Add, as predicted (§5). Effect sizes are small (≈0.1–0.8 % of held-out variance) — consistent with running modulating a minority of cells. Under **Benjamini–Hochberg FDR (q=0.05)** across the 12 term×stimulus tests, **every effect survives except the two static-gratings running terms** (ΔR²_mult, ΔR²_full); all additive terms and all drifting-grating / natural-scene terms remain significant. (Under the stricter Bonferroni bound, ΔR²_mult(dg) and the spontaneous terms become marginal.)
+
+- **H1 (presence) — supported** for dg (p=.003), ns (p=3e-6) and spont (p=.018); sg only marginal (p=.064). Running carries out-of-sample predictive information beyond stimulus tuning and slow drift.
+- **H2 (gain structure) — present but stimulus-dependent.** A significant multiplicative term appears for **natural scenes** (p=2e-4, robust) and **drifting gratings** (p=.029) but is **absent for static gratings** (n.s.; there Full < Add — the gain column only adds noise). So sg modulation is purely additive, whereas dg and ns carry a genuine gain component — statistically clearest for natural scenes.
+- **H3 (gratings vs natural — the crux) — modulation differs across stimulus type, but not as the "grating-specific" prior expected.** Paired across the same cells, natural-scene modulation is **comparable to drifting gratings** (ΔR²_mult p=.23, ΔR²_full p=.23) and **significantly exceeds static gratings** (ΔR²_mult p=.010, ΔR²_full p=.003). Natural scenes are therefore **not less** modulated by running than gratings — the "novel result" branch of §6, matching the Froudarakis-based prediction (§1, §5). The naive reading that running acts "specifically in drifting gratings" is **not** supported.
+
+**Validation (controls defined in §8).** *Positive control:* per-cell ΔR²_full correlates positively with the Allen `run_mod_*` index for all three stimuli (Spearman ρ = +0.15 dg / +0.24 sg / +0.25 ns) — correct sign, though not individually significant at n=47. *Sensitivity (responsive cells only, Allen p<0.05):* the picture strengthens — dg median ΔR²_full = +0.009 (p=.004, n=30), sg becomes significant (p=.034, n=43), ns robust (+0.003, p=6e-6, n=44). *Negative control:* shuffling V collapses ΔR²_add/mult to ≈ 0.
+
+**Verdict.** Running modulation of V1 is present and cross-validated (H1); its structure is mixed and stimulus-dependent — multiplicative gain in drifting gratings and natural scenes, additive-only in static gratings (H2); and it differs across stimulus type (H3), with **natural scenes modulated at least as strongly as drifting gratings** — the project's novel contribution. All effects are small and should be read as preliminary; the gratings-vs-natural contrast carries the confounds in §9, and robustness to the response-window and `n_basis` choices is a recommended follow-up.
+
+## 8. Validation & controls
 
 - **Positive control (external):** per-neuron modulation (sign/magnitude of ΔR²_full or β_add) should correlate with the pre-computed Allen indices `run_mod_dg/sg/ns` (and agree with `p_run_mod_*`) in `data/neurons_metadata.csv`. Large divergence flags a methodological error.
 - **Positive control (internal):** the fitted f̂(S) coefficient ≈ 1.
 - **Negative control:** shuffling V across trials must collapse ΔR²_add and ΔR²_mult to ≈ 0 (running carries no information under the null).
 
-## 8. Limitations & confounds
+## 9. Limitations & confounds
 
 - **Gratings-vs-natural comparability** ([`TASKS.md`](TASKS.md):99–111): dg trials ≈ 60 frames (2 s) vs sg/ns ≈ 7 frames (0.23 s); ~40 grating conditions vs 118 images (~15 vs ~50 trials/condition); differing behavioural timescale. Differences in ΔR² across stimulus type are confounded by these; control with matched windows/normalisation and state the confound.
 - **Linearised (not rectified) gain** — the interaction approximates `ReLU[1+β_mult V]`; the rectification and any strongly negative-V regime are not modelled (V is near-non-negative in practice).
 - **Arousal vs locomotion** are dissociable (Vinck et al. 2015); running here is a proxy for the active state, not isolated motor drive.
 - **Two-photon under-reporting** and **~47-neuron** sample limit power; treat null results cautiously and prefer population statistics.
 
-## 9. References
+## 10. References
 
 Model & machinery: Liska/Yates (V1Locomotion, eLife 87736). Additive/multiplicative decomposition: Dadarlat & Stryker 2017. Gain preserving tuning: Niell & Stryker 2010. Allen dataset / running prevalence: de Vries et al. 2020. State-dependent natural-scene coding: Froudarakis et al. 2014. Running-as-input natural-image encoding template: Li et al. 2023 (V1T). Full citations and URLs in [`REFERENCES.md`](REFERENCES.md).
