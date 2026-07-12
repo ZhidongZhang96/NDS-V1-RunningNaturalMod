@@ -48,16 +48,16 @@ Two published repos are near-exact references for our analyses. **Both are grati
 
 ## Person A — Analysis 1: `SpeedTuning` (medium) + shared reducers
 
-Owns `utils.py` L456–551 + the Phase-0 reducers.
-- [ ] **A1** `compute_tuning(n_bins=20)` (L484–498) → `bin_centers`, `mean_responses`, `std_responses`.
-- [ ] **A2** `significance_test(n_shuffles=1000)` (L500–516) → `p_values`, `significant_mask` (shuffle speed labels, recompute tuning, **Levene** observed-vs-shuffled per cell, `p<0.05`).
-- [ ] **A3** `compute_spearman()` (L518–526) → `rho`, `rho_p_values` (`scipy.stats.spearmanr`).
-- [ ] **A4** `plot_tuning_curve(cell=None)` (L530–543) — single cell (mean±std) and population heatmap.
-- [ ] **A5** `plot_significant_neurons()` (L545–551).
-- [ ] **A6** Run A1–A3 **separately for each stimulus** (dg, sg, ns, spontaneous — never pooled); report fraction of significantly-tuned cells per stimulus. For ns, drop blank (`frame==-1`) trials first. With only ~47 cells (and ~34% of Allen neurons unresponsive to all stimuli; de Vries 2020), consider restricting to responsive cells via `p_dg/p_sg/p_ns` before interpreting fractions.
-- [ ] **A7 (stretch)** Port Christensen's tuning-shape classifier (`gaus_model_comparison`).
+Owns `utils.py` L476–791 + the Phase-0 reducers. (Note: actual implementation grew beyond the initially planned L456–551 range, adding plotting and comparison functions.)
+- [x] **A1** `compute_tuning(n_bins=20)` (L634–652) → `bin_centers`, `mean_responses`, `std_responses`. Also implements `_binned_responses()`, `_subsample()` for handling unbalanced speed distribution.
+- [x] **A2** `significance_test(n_shuffles=1000)` (L655–696) → `p_values`, `significant_mask` (shuffle speed labels, re-compute tuning, **Levene** observed-vs-shuffled per cell, `p<0.05`).
+- [x] **A3** `compute_spearman()` (L699–736) → `rho`, `rho_p_values` (`scipy.stats.spearmanr`). Also categorizes monotonicity (positive/negative/non-monotonic) with `rho_threshold` and `p_threshold` parameters.
+- [x] **A4** `plot_tuning_curve(cells=None)` (L741–777) — average ± SEM over given cells or all cells.
+- [x] **A5** `print_tuned_cells()` (L779–791) — prints counts and ρ values per monotonicity category. Replaces the originally planned `plot_significant_neurons()`.
+- [x] **A6** Run A1–A3 **separately for each stimulus** (dg, sg, ns, spontaneous — never pooled); report numbers of significantly-tuned cells per stimulus, consider responsive cells via `p_dg/p_sg/p_ns` before interpreting fractions. **→ [SpeedTuning.md](SpeedTuning.md)**
 
-**Done when:** per-stimulus significant-tuned fraction produced; sign of `rho` broadly agrees with `neurons_metadata.csv` responsiveness (`p_dg/p_sg/p_ns`).
+- [ ] **A7 (stretch)** Port Christensen's tuning-shape classifier (`gaus_model_comparison`).
+**Done when:** per-stimulus significant-tuned fraction produced; sign of `rho` broadly agrees with `neurons_metadata.csv` responsiveness (`p_dg/p_sg/p_ns`). **Status: DONE (A1–A6 complete).**
 
 ---
 
@@ -125,13 +125,13 @@ The project's whole point is comparing running modulation between **gratings** (
 ## Verification (end-to-end)
 
 1. `conda activate allensdk`; run `visual_coding.ipynb` top-to-bottom with the `.npz` in `../data/`.
-2. **A1**: per-stimulus significant-tuned fraction printed (each stimulus separate; ns blank excluded); tuning/significance plots render.
+2. **A1 (DONE)**: per-stimulus significant-tuned fraction produced: 17/47 pooled (36%), 3/47 spontaneous (6%). Tuning and significance plots render (`plot_tuning_curves_grid`, `plot_monotonicity_stacked_bar`, `plot_monotonicity_grid`).
 3. **A2**: `compute_mi` across all four stimuli; scatter slope `a`≈gain; MI median printed; `mi` correlates with `run_mod_*`.
 4. **A3**: `fit_all` completes for all cells; finite ΔR² with `full ≥ add,mult`; ns residual model runs; decomposition plot renders.
 5. **Research question**: one figure/table contrasts running modulation (MI + ΔR²_mult) for **gratings (dg, sg) vs natural (ns)**, with spontaneous as baseline — comparability caveats stated explicitly.
 
 ## Milestones
 
-1. **M1** — Phase 0 done (data loads; windows + blank-frame policy + reducers + CV splitter merged). A1–A3, B1–B2, C1–C3 in progress on separate branches.
+1. **M1** — Phase 0 done (data loads; windows + blank-frame policy + reducers + CV splitter merged). **A1–A6 complete** (SpeedTuning implementation and per-stimulus analysis done). B1–B2, C1–C3 in progress on separate branches.
 2. **M2** — all three analyses produce per-stimulus results; metadata validation passes (B7).
 3. **M3** — gratings-vs-natural comparison (B6); plots polished (A4/A5, B4/B5, C8); write-up assembled (B8).
