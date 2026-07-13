@@ -8,25 +8,6 @@ N_CELLS = 47
 STIMULI = ['drifting_gratings', 'static_gratings', 'natural_scenes', 'spontaneous']
 SHORT_STIM = ['dg', 'sg', 'ns', 'spont']
 
-# colour scheme for monotonicity categories
-POS_COLOR = '#E74C3C'                        # positive  (red)
-NEG_COLOR = '#3498DB'                        # negative  (blue)
-NM_COLOR  = "#6A8B6D"                        # non-monotonic (teal)
-OTHER_COLOR = '#7f7f7f'                      # "Others" in condition plots
-
-
-def _hex_to_rgb(h: str) -> tuple[float, float, float]:
-    """Convert hex colour '#RRGGBB' to (R, G, B) in [0, 1]."""
-    h = h.lstrip('#')
-    return tuple(int(h[i:i+2], 16) / 255 for i in (0, 2, 4))
-
-
-POS_RGB = _hex_to_rgb(POS_COLOR)
-NEG_RGB = _hex_to_rgb(NEG_COLOR)
-NM_RGB  = _hex_to_rgb(NM_COLOR)
-DARK_GRAY = (0.3, 0.3, 0.3)  # for blending weak-tuned cells in grid plots
-
-
 def check_stim(stimulus:str):
     assert stimulus in STIMULI, f"You must choose one of the stimulus type: {STIMULI}"
 
@@ -490,6 +471,23 @@ class Plotter:
 # Analysis 1 — Binned Speed Tuning
 # ==============================================================================
 
+# colour scheme for monotonicity categories
+POS_COLOR = '#E74C3C'                        # positive  (red)
+NEG_COLOR = '#3498DB'                        # negative  (blue)
+NM_COLOR  = "#6A8B6D"                        # non-monotonic (teal)
+OTHER_COLOR = '#7f7f7f'                      # "Others" in condition plots
+
+
+def _hex_to_rgb(h: str) -> tuple[float, float, float]:
+    """Convert hex colour '#RRGGBB' to (R, G, B) in [0, 1]."""
+    h = h.lstrip('#')
+    return tuple(int(h[i:i+2], 16) / 255 for i in (0, 2, 4))
+
+POS_RGB = _hex_to_rgb(POS_COLOR)
+NEG_RGB = _hex_to_rgb(NEG_COLOR)
+NM_RGB  = _hex_to_rgb(NM_COLOR)
+DARK_GRAY = (0.3, 0.3, 0.3)  # for blending weak-tuned cells in grid plots
+
 
 class SpeedTuning:
     """Running-speed binned tuning curves and significance tests.
@@ -568,7 +566,6 @@ class SpeedTuning:
             all_v.append(td.running_speed.mean(axis=-1))     # (n_trials,)
         return np.concatenate(all_r, axis=1), np.concatenate(all_v, axis=0)
 
-
     def _binned_responses(self, bins_ids=None):
         """Bin trials by ``bins_ids`` and average responses per bin.
 
@@ -641,6 +638,7 @@ class SpeedTuning:
 
         self.bins_sub_ids = bins_ids
 
+
     # ------------- core computation -------------
     
     def run(self):
@@ -668,7 +666,6 @@ class SpeedTuning:
         # subsample, for significant test
         self.bins_sub_ids = self.bins_ids
         self._subsample() 
-
 
     def significance_test(self, n_shuffles: int = 1000, threshold: float = 0.05):
         """Shuffle running-speed labels and re-compute tuning curves to assess significance.
@@ -712,7 +709,6 @@ class SpeedTuning:
 
         self.levene_p_values = p_values
         self.significant_mask = significant_mask
-
 
     def compute_spearman(self, rho_threshold=0, p_threshold = 0.05):
         """Spearman rank correlation between response and running speed per cell, to test monotonicity of tuning. 
@@ -761,16 +757,10 @@ class SpeedTuning:
         assert self.monotonic_mask is not None, "call compute_spearman() first"
         print(f"Significantly tuned neurons: #{self.significant_mask.sum()} \n {np.where(self.significant_mask)[0]}")
 
-        print(f"Positive tuned neurons: #{self.monotonic_mask['positive'].sum()} \n {np.where(self.monotonic_mask['positive'])[0]}")
-        print(self.rho[self.monotonic_mask['positive']].round(3))
-
-        print(f"Negative tuned neurons: #{self.monotonic_mask['negative'].sum()} \n {np.where(self.monotonic_mask['negative'])[0]}")
-        print(self.rho[self.monotonic_mask['negative']].round(3))
-
-        print(f"Non-monotonic tuned neurons: #{self.monotonic_mask['non-monotonic'].sum()} \n {np.where(self.monotonic_mask['non-monotonic'])[0]}")
-        print(self.rho[self.monotonic_mask['non-monotonic']].round(3))
-
-
+        for key in ('positive', 'negative', 'non-monotonic'):
+            mask = self.monotonic_mask[key]
+            print(f"{key} tuned neurons: #{mask.sum()} \n {np.where(mask)[0]}")
+            print(self.rho[mask].round(3))
 
     def plot_tuning_curve(self, cells: list[int] | None = None, figsize=(5,3), semcolor=None, label=None, ax=None) -> plt.Axes:
         """Plot speed tuning curve with Mean and SEM over the given cells.
@@ -791,103 +781,125 @@ class SpeedTuning:
         assert self.mean_all_responses is not None, "call compute_tuning() first"
         assert self.bins_centers is not None, "call compute_tuning() first"
 
-        if ax == None:
+        if ax is None:
             _, ax = plt.subplots(figsize=figsize)
 
         res_cells = self.mean_all_responses[cells] if cells else self.mean_all_responses
-        means = res_cells.mean(axis=0)     # (n_bins)
+        means = res_cells.mean(axis=0)
         sem = res_cells.std(axis=0) / np.sqrt(res_cells.shape[0])
-        
-        ax.fill_between(self.bins_centers, means-sem, means+sem, color=semcolor, alpha=0.5, edgecolor='none', label=label)
-        ax.plot(self.bins_centers, means, color=semcolor, markerfacecolor='black', markeredgecolor='black', marker='o', markersize=3)
-        
+
+        ax.fill_between(self.bins_centers, means - sem, means + sem,
+                        color=semcolor, alpha=0.5, edgecolor='none', label=label)
+        ax.plot(self.bins_centers, means, color=semcolor,
+                marker='o', markersize=3,
+                markerfacecolor='black', markeredgecolor='black')
         ax.set_xlabel('running speed (cm/s)')
         ax.set_ylabel('average $\\Delta$F/F')
-
-        # display summary stats of the plotted cells
-        # if self.rho is not None:
-        #     rho_cells = self.rho[cells] if cells else self.rho
-        #     mean_rho = rho_cells.mean()
-        #     n_plotted = len(rho_cells)
-
-        #     lines = [f'$\\bar{{\\rho}}$ = {mean_rho:.3f}']
-
-        #     # if self.significant_mask is not None:
-        #     #     sig = self.significant_mask[cells] if cells else self.significant_mask
-        #     #     n_sig = sig.sum()
-        #     #     lines.append(f'tuned: {n_sig}/{n_plotted} ({100*n_sig/n_plotted:.0f}%)')
-
-        #     #     if self.monotonic_mask is not None:
-        #     #         pos = self.monotonic_mask['positive'][cells] if cells else self.monotonic_mask['positive']
-        #     #         neg = self.monotonic_mask['negative'][cells] if cells else self.monotonic_mask['negative']
-        #     #         nm = self.monotonic_mask['non-monotonic'][cells] if cells else self.monotonic_mask['non-monotonic']
-        #     #         lines.append(f'+:{pos.sum()}  -:{neg.sum()}  ~:{nm.sum()}')
-
-        #     ax.text(0.95, 0.95, '\n'.join(lines),
-        #             transform=ax.transAxes, ha='right', va='top',
-        #             fontsize=10, bbox=dict(boxstyle='round,pad=0.3', fc='wheat', alpha=0.5))
-
-        # ax.set_ylim(bottom=0)
         return ax
 
-
-    def plot_tuning_by_monotonicity(self, axes=None, figsize=(10, 3.5)) -> plt.Figure:
-        """Subplots: tuning curves for positive / negative / non-monotonic cells separately.
+    def _plot_tuning_by_monotonicity(self, responses, ylabel, axes, figsize, cells=None):
+        """Shared core: plot 3-panel monotonicity figure from a response matrix.
 
         Parameters
         ----------
-        axes : array-like of 3 Axes, optional
-            Existing axes to draw into. If None, a new 1x3 figure is created.
-        figsize : tuple, optional.
+        responses : np.ndarray, shape (n_cells, n_bins)
+            Response values to plot (raw mean or z-scored).
+        ylabel : str
+            Y-axis label for the leftmost subplot.
+        axes : array-like of 3 Axes or None
+        figsize : tuple
+        cells : list[int] or None, optional
+            Subset of cells to plot. None = all cells.
 
         Returns
         -------
         plt.Figure
         """
+        assert self.bins_centers is not None, "call compute_tuning() first"
         assert self.significant_mask is not None, "call significance_test() first"
-        assert self.monotonic_mask is not None, "call compute_spearman() first"
+        assert self.monotonic_mask is not None and self.rho is not None, "call compute_spearman() first"
+
+        if cells is not None:
+            cells = list(cells) if not isinstance(cells, int) else [cells]
+            responses = responses[cells]
+            bg = ~self.significant_mask[cells]
+            rho = self.rho[cells]
+            masks = {k: self.monotonic_mask[k][cells] for k in ('positive', 'negative', 'non-monotonic')}
+        else:
+            bg = ~self.significant_mask
+            rho = self.rho
+            masks = self.monotonic_mask
 
         cats = [
-            ('positive',      POS_COLOR, 'positive'),
-            ('negative',      NEG_COLOR, 'negative'),
-            ('non-monotonic', NM_COLOR,  'non-mono'),
+            ('positive',      POS_COLOR),
+            ('negative',      NEG_COLOR),
+            ('non-monotonic', NM_COLOR),
         ]
-        bg = (~self.significant_mask)  # non-significant cells as background
 
         if axes is None:
             fig, axes = plt.subplots(1, 3, figsize=figsize)
         else:
             fig = axes.flat[0].figure if hasattr(axes, 'flat') else axes[0].figure
 
-        for ax, (key, color, label) in zip(axes, cats):
-            mask = self.monotonic_mask[key]
+        for ax, (key, color) in zip(axes, cats):
+            mask = masks[key]
             n = mask.sum()
+            label = 'non-mono' if key == 'non-monotonic' else key
 
-            # background: non-significant cells in grey
+            # non-significant cells as grey background
             if bg.any():
-                self.plot_tuning_curve(cells=np.where(bg)[0].tolist(), ax=ax,
-                                       semcolor='lightgray')
-            # main: category cells in colour
-            if n > 0:
-                self.plot_tuning_curve(cells=np.where(mask)[0].tolist(), ax=ax,
-                                       semcolor=color)
+                r = responses[bg]
+                m = r.mean(axis=0)
+                s = r.std(axis=0) / np.sqrt(r.shape[0])
+                ax.fill_between(self.bins_centers, m - s, m + s,
+                                color='lightgray', alpha=0.5, edgecolor='none')
+                ax.plot(self.bins_centers, m, color='lightgray',
+                        marker='o', markersize=3,
+                        markerfacecolor='black', markeredgecolor='black')
 
-            ax.set_title(f'{label} (# {n})')
+            # category cells in colour
+            if n > 0:
+                r = responses[mask]
+                m = r.mean(axis=0)
+                s = r.std(axis=0) / np.sqrt(r.shape[0])
+                ax.fill_between(self.bins_centers, m - s, m + s,
+                                color=color, alpha=0.5, edgecolor='none')
+                ax.plot(self.bins_centers, m, color=color,
+                        marker='o', markersize=3,
+                        markerfacecolor='black', markeredgecolor='black')
+
+            rho_mean = rho[mask].mean() if n > 0 else float('nan')
+            ax.set_title(f'{label} (# {n}, $\\bar{{\\rho}}$={rho_mean:.3f})')
             ax.set_ylabel('')
 
-        axes[0].set_ylabel('average $\\Delta$F/F')
-        fig.tight_layout(rect=[0,0,1,0.94])
-        
+        axes[0].set_ylabel(ylabel)
+        fig.tight_layout(rect=(0, 0, 1, 0.94))
         return fig
 
+    def plot_tuning_by_monotonicity(self, axes=None, figsize=(10, 3.5), cells=None) -> plt.Figure:
+        """Subplots: tuning curves for positive / negative / non-monotonic cells separately."""
+        assert self.mean_all_responses is not None, "call compute_tuning() first"
+        return self._plot_tuning_by_monotonicity(
+            self.mean_all_responses, 'average $\\Delta$F/F', axes, figsize, cells)
 
-# ------------- cross-stimulus comparison plots -------------
+    def plot_tuning_by_monotonicity_zscore(self, axes=None, figsize=(10, 3.5), cells=None) -> plt.Figure:
+        """Subplots with per-cell z-scored tuning curves for each monotonicity category."""
+        assert self.mean_all_responses is not None, "call compute_tuning() first"
+
+        mu = self.mean_all_responses.mean(axis=1, keepdims=True)
+        sd = self.mean_all_responses.std(axis=1, keepdims=True)
+        sd = np.where(sd == 0, 1.0, sd)  # avoid division by zero for flat cells
+        responses_z = (self.mean_all_responses - mu) / sd
+
+        return self._plot_tuning_by_monotonicity(
+            responses_z, 'z-scored $\\Delta$F/F', axes, figsize, cells)
 
 
 def plot_tuning_curves_grid(tunings: dict[str, SpeedTuning],
                              labels: list[str] | None = None,
                              cells: int | list[int] | None = None,
-                             figsize=(8, 6)) -> plt.Figure:
+                             figsize=(8, 6),
+                             show_rho: bool = False) -> plt.Figure:
     """Plot tuning curves for all stimuli in a 2x2 grid.
 
     Parameters
@@ -902,6 +914,8 @@ def plot_tuning_curves_grid(tunings: dict[str, SpeedTuning],
         None → all cells.
     figsize : tuple, optional
         Figure size, by default (8, 6).
+    show_rho : bool, optional
+        If True, display the mean Spearman rho of plotted cells in each subplot title.
 
     Returns
     -------
@@ -911,19 +925,21 @@ def plot_tuning_curves_grid(tunings: dict[str, SpeedTuning],
         labels = list(tunings.keys())
     assert len(labels) <= 4, "max 4 stimuli for 2x2 grid"
 
-    # normalize to list
     if isinstance(cells, int):
         cells = [cells]
 
     fig, axes = plt.subplots(2, 2, figsize=figsize, sharex=True)
-    # colors = ['#E74C3C', '#3498DB', '#2ECC71', '#95A5A6']
-    # colors = ['#3498DB', '#3498DB', '#3498DB', '#95A5A6']
 
     for i, lbl in enumerate(labels):
         ax = axes.flat[i]
         tunings[lbl].plot_tuning_curve(cells=cells, ax=ax, semcolor='gray')
-                                       #semcolor=colors[i % len(colors)])
-        ax.set_title(lbl)
+        title = lbl
+        if show_rho:
+            t = tunings[lbl]
+            assert t.rho is not None, "call compute_spearman() first"
+            rho_vals = t.rho[cells] if cells else t.rho
+            title += f'  ($\\bar{{\\rho}}$={rho_vals.mean():.3f})'
+        ax.set_title(title)
         ax.set_ylim(bottom=0)
 
     # x label only on bottom row
@@ -941,9 +957,8 @@ def plot_tuning_curves_grid(tunings: dict[str, SpeedTuning],
     for i in range(len(labels), 4):
         axes[i].set_visible(False)
 
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
     return fig
-
 
 def plot_monotonicity_stacked_bar(tunings: dict[str, SpeedTuning],
                                    ax: plt.Axes = None,
@@ -980,12 +995,13 @@ def plot_monotonicity_stacked_bar(tunings: dict[str, SpeedTuning],
     counts = {}
     for lbl in labels:
         t = tunings[lbl]
-        if t.significant_mask is None or t.significant_mask.sum() == 0:  
+        assert t.monotonic_mask is not None, "call compute_spearman() first"
+        if t.significant_mask is None or t.significant_mask.sum() == 0:
             counts[lbl] = {c: 0.0 for c in categories}
         else:
             sig = t.significant_mask
             n = sig.sum()
-            counts[lbl] = {c: t.monotonic_mask[c][sig].sum() 
+            counts[lbl] = {c: t.monotonic_mask[c][sig].sum()
                             for c in categories}
 
     x = np.arange(len(labels))
@@ -1014,7 +1030,6 @@ def plot_monotonicity_stacked_bar(tunings: dict[str, SpeedTuning],
     ax.legend(fontsize=9)
     return ax
 
-
 def plot_rho_pairwise_scatter(tuning_a: SpeedTuning, tuning_b: SpeedTuning,
                                label_a: str, label_b: str,
                                ax: plt.Axes = None) -> plt.Axes:
@@ -1036,22 +1051,21 @@ def plot_rho_pairwise_scatter(tuning_a: SpeedTuning, tuning_b: SpeedTuning,
     -------
     plt.Axes
     """
+    assert tuning_a.rho is not None, "call compute_spearman() first"
+    assert tuning_b.rho is not None, "call compute_spearman() first"
+    assert tuning_a.significant_mask is not None, "call significance_test() first"
+    assert tuning_b.significant_mask is not None, "call significance_test() first"
+
     if ax is None:
         _, ax = plt.subplots(figsize=(5, 5))
 
     rho_a, rho_b = tuning_a.rho, tuning_b.rho
     sig_a, sig_b = tuning_a.significant_mask, tuning_b.significant_mask
-    ma, mb = tuning_a.monotonic_mask, tuning_b.monotonic_mask
 
     both = sig_a & sig_b
     only_a = sig_a & ~sig_b
     only_b = sig_b & ~sig_a
     neither = ~sig_a & ~sig_b
-
-    # among both-significant: same monotonic direction?
-    # same_dir = both & ((ma['positive'] & mb['positive']) |
-    #                    (ma['negative'] & mb['negative']))
-    # diff_dir = both & ~same_dir
 
     ax.scatter(rho_a[neither], rho_b[neither],
                c='gray', s=10, label='neither tuned', alpha=0.7)
@@ -1059,13 +1073,8 @@ def plot_rho_pairwise_scatter(tuning_a: SpeedTuning, tuning_b: SpeedTuning,
                c=POS_COLOR, s=15, label=f'only {label_a}', alpha=0.7)
     ax.scatter(rho_a[only_b], rho_b[only_b],
                c=NEG_COLOR, s=15, label=f'only {label_b}', alpha=0.7)
-    
     ax.scatter(rho_a[both], rho_b[both],
             c='#2ECC71', s=20, label='both tuned', alpha=0.8)
-    # ax.scatter(rho_a[same_dir], rho_b[same_dir],
-    #            c='#2ECC71', s=20, label='both, same direction', alpha=0.8)
-    # ax.scatter(rho_a[diff_dir], rho_b[diff_dir],
-    #            c='#F39C12', s=20, label='both, different', alpha=0.8)
 
     # diagonal reference line
     lim = max(np.nanmax(np.abs(rho_a)), np.nanmax(np.abs(rho_b)))
@@ -1079,13 +1088,18 @@ def plot_rho_pairwise_scatter(tuning_a: SpeedTuning, tuning_b: SpeedTuning,
     ax.set_aspect('equal')
     return ax
 
-
 def plot_monotonicity_grid(tunings: dict[str, SpeedTuning],
                             responsive: dict[str, np.ndarray] | None = None,
                             figsize=(6, 10)) -> plt.Figure:
     """Grey background for responsive cells, coloured ρ text (by monotonicity
     category) with alpha = |ρ| for speed-tuned cells."""
     labels = list(tunings.keys())
+    # assert all tunings have computed results
+    for t in tunings.values():
+        assert t.rho is not None, "call compute_spearman() first"
+        assert t.significant_mask is not None, "call significance_test() first"
+        assert t.monotonic_mask is not None, "call compute_spearman() first"
+
     J = len(labels)
     I = len(next(iter(tunings.values())).rho)
 
