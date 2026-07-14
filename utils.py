@@ -588,15 +588,25 @@ class BinaryModulation:
 
     def __init__(self, trial_data: TrialData):
         self._td = trial_data
+
         # filled by classify_trials()
-        self.run_mask = None          # np.ndarray of bool, shape (n_trials,)
-        self.still_mask = None        # np.ndarray of bool, shape (n_trials,)
-        self.ignored_mask = None      # np.ndarray of bool, shape (n_trials,)
+        self.run_mask = None          # np.ndarray, shape (n_trials,)
+        self.still_mask = None        # np.ndarray, shape (n_trials,)
+        self.ignored_mask = None      # np.ndarray, shape (n_trials,)
+
         # filled by compute_mi()
+        self.r_run = None             # np.ndarray, shape (n_cells,)
+        self.r_still = None           # np.ndarray, shape (n_cells,)
         self.mi = None                # np.ndarray, shape (n_cells,)
+
         # filled by fit_gain_model()
         self.gain_a = None            # np.ndarray, shape (n_cells,)
         self.gain_b = None            # np.ndarray, shape (n_cells,)
+        self.gain_r2 = None           # np.ndarray, shape (n_cells,)
+
+        self.condition_still = None   # list length n_cells; each item shape (n_valid_conditions,)
+        self.condition_run = None     # list length n_cells; each item shape (n_valid_conditions,)
+        self.n_gain_conditions = None # np.ndarray, shape (n_cells,)
 
     def classify_trials(
         self,
@@ -619,7 +629,22 @@ class BinaryModulation:
         still_mask : np.ndarray of bool, shape ``(n_trials,)``
         ignored_mask : np.ndarray of bool, shape ``(n_trials,)``
         """
-        raise NotImplementedError
+        speed = np.asarray(self._td.running_speed)
+
+        if speed.ndim != 2:
+            raise ValueError(
+                f"Expected running_speed with shape (n_trials, duration), got {speed.shape}"
+            )
+
+        mean_speed = np.nanmean(speed, axis=1)
+        min_speed = np.nanmin(speed, axis=1)
+        max_speed = np.nanmax(speed, axis=1)
+
+        self.run_mask = (mean_speed > run_threshold) & (min_speed > still_threshold)
+        self.still_mask = (mean_speed < still_threshold) & (max_speed < run_threshold)
+        self.ignored_mask = ~(self.run_mask | self.still_mask)
+
+        return self.run_mask, self.still_mask, self.ignored_mask
 
     def compute_mi(self):
         """Compute Modulation Index per cell.
@@ -634,9 +659,82 @@ class BinaryModulation:
         mi : np.ndarray, shape ``(n_cells,)``
             Modulation index for each cell.
         """
-        raise NotImplementedError
+        if self.run_mask is None or self.still_mask is None:
+            raise ValueError("Please run classify_trials() first.")
 
-    def fit_gain_model(self):
+        response = np.asarray(self._td.responses)
+        if response.ndim != 3:
+            raise ValueError(
+                f"Expected response with shape (n_cells, n_trial, duration), got {response.shape}"
+            )
+
+        # Average calcium response over the response window.
+        response_mean = np.nanmean(response, axis=2)  # (n_cells, n_trials)
+
+        n_cells = response_mean.shape[0]
+
+        if self.run_mask.sum() == 0 or self.still_mask.sum() == 0:
+            self.mi = np.full(n_cells, np.nan)
+            self.r_run = np.full(n_cells, np.nan)
+            self.r_still = np.full(n_cells, np.nan)
+            return self.mi
+
+        # Average response across running / still trials for each cell.
+        self.r_run = np.nanmean(response_mean[:, self.run_mask], axis=1)      # (n_cells,)
+        self.r_still = np.nanmean(response_mean[:, self.still_mask], axis=1)  # (n_cells,)
+
+        denom = self.r_run + self.r_still
+
+        self.mi = np.full(n_cells, np.nan, dtype=float)
+        valid = np.isfinite(denom) & (np.abs(denom) > 1e-12)
+
+        self.mi[valid] = (
+            self.r_run[valid] - self.r_still[valid]
+        ) / denom[valid]
+
+        return self.mi
+
+    def get_condition_labels(self):
+        """Build one visual-stimulus condition label for each trial.
+
+        Returns
+        -------
+        labels : np.ndarray or None
+            One label per trial. For spontaneous activity, returns None.
+        """
+        
+        n_trials = self._td.responses.shape[1]
+        stimulus = self._td.stimulus
+        params = self._td.stimulus_params
+
+        # Spontaneous activity has no visual stimulus identity.
+        if stimulus == "spontaneous" or params is None:
+            return None
+
+        # Natural scenes: each image frame is one visual condition.
+        if stimulus == "natural_scenes":
+            return np.asarray(params["frame"])
+
+        # Drifting gratings: condition = orientation × temporal frequency.
+        if stimulus == "drifting_gratings":
+            condition_keys = ["orientation", "temporal_frequency"]
+
+        # Static gratings: condition = orientation × spatial frequency × phase.
+        elif stimulus == "static_gratings":
+            condition_keys = ["orientation", "spatial_frequency", "phase"]
+
+        else:
+            raise ValueError(f"Unsupported stimulus: {stimulus}")
+        
+        labels = np.empty(n_trials, dtype=object)
+        for trial_index in range(n_trials):
+            labels[trial_index] = tuple(
+                params[key][trial_index]
+                for key in condition_keys
+            )
+        return labels
+        
+    def fit_gain_model(self, min_trials_per_state: int = 2):
         """Fit linear gain model: :math:`R_{\\text{run}} = a \\cdot R_{\\text{still}} + b`.
 
         Stores
@@ -646,7 +744,76 @@ class BinaryModulation:
         gain_b : np.ndarray, shape ``(n_cells,)``
             Additive offset.
         """
-        raise NotImplementedError
+        if self.run_mask is None or self.still_mask is None:
+            self.classify_trials()
+
+        response = np.asarray(self._td.responses)
+        if response.ndim != 3:
+            raise ValueError(f"Expected response with shape (n_cells, n_trial, duration), got {response.shape}")
+        response_mean = np.nanmean(response, axis=2) # (n_cells, n_trials)
+
+        n_cells, n_trials = response_mean.shape
+        labels = self.get_condition_labels()
+        
+        self.gain_a = np.full(n_cells, np.nan)
+        self.gain_b = np.full(n_cells, np.nan)
+        self.gain_r2 = np.full(n_cells, np.nan)
+        self.n_gain_conditions = np.zeros(n_cells, dtype=int)
+        self.condition_still = [
+            np.array([], dtype=float) for _ in range(n_cells)
+        ] 
+        self.condition_run = [
+            np.array([], dtype=float) for _ in range(n_cells)
+        ]
+
+        if labels is None:
+            return self.gain_a, self.gain_b
+        
+        unique_conditions = pd.unique(labels)
+        for cell_index in range(n_cells):
+            still_values = []
+            run_values = []
+            for condition in unique_conditions:
+                mask_condition = np.array(
+                    [label == condition for label in labels],
+                    dtype=bool,
+                )
+                mask_c_still = mask_condition & self.still_mask
+                mask_c_run = mask_condition & self.run_mask
+                if mask_c_still.sum() < min_trials_per_state:
+                    continue
+                if mask_c_run.sum() < min_trials_per_state:
+                    continue
+                mean_still = np.nanmean(response_mean[cell_index, mask_c_still])
+                mean_run = np.nanmean(response_mean[cell_index, mask_c_run])
+                
+                if np.isfinite(mean_still) and np.isfinite(mean_run):
+                    still_values.append(mean_still)
+                    run_values.append(mean_run)
+            
+            run_values = np.asarray(run_values, dtype=float)
+            still_values = np.asarray(still_values, dtype=float)
+
+            self.condition_run[cell_index] = run_values
+            self.condition_still[cell_index] = still_values
+            self.n_gain_conditions[cell_index] = len(run_values)
+
+            if len(run_values) < min_trials_per_state:
+                continue
+            
+            slope, intercept = np.polyfit(still_values, run_values, deg=1)
+
+            #check the quality of the fit
+            predicted_run = slope * still_values + intercept
+            ss_res = np.sum((run_values - predicted_run) ** 2)
+            ss_tot = np.sum((run_values - np.mean(run_values)) ** 2)
+            if ss_tot > 1e-12:
+                self.gain_r2[cell_index] = 1 - ss_res / ss_tot
+
+            self.gain_a[cell_index] = slope
+            self.gain_b[cell_index] = intercept
+
+        return self.gain_a, self.gain_b
     
     # ------------- plotting -------------
     
@@ -659,7 +826,93 @@ class BinaryModulation:
             If given, plot a single cell. Otherwise show all cells
             in subplots or a combined layout.
         """
-        raise NotImplementedError
+        if self.mi is None:
+            self.compute_mi()
+
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(5, 5))
+        else:
+            fig = ax.figure
+
+        if cell is None:
+            x = np.asarray(self.r_still, dtype=float)
+            y = np.asarray(self.r_run, dtype=float)
+
+            valid = np.isfinite(x) & np.isfinite(y)
+
+            ax.scatter(
+                x[valid],
+                y[valid],
+                alpha=0.75,
+                label="Cells",
+            )
+
+            title = f"{self._td.stimulus}: population response"
+
+        else:
+            if self.gain_a is None:
+                self.fit_gain_model()
+
+            x = np.asarray(self.condition_still[cell], dtype=float)
+            y = np.asarray(self.condition_run[cell], dtype=float)
+
+            valid = np.isfinite(x) & np.isfinite(y)
+
+            ax.scatter(
+                x[valid],
+                y[valid],
+                alpha=0.75,
+                label="Stimulus conditions",
+            )
+
+            slope = self.gain_a[cell]
+            intercept = self.gain_b[cell]
+
+            if valid.sum() >= 2 and np.isfinite(slope):
+                x_line = np.linspace(
+                    np.min(x[valid]),
+                    np.max(x[valid]),
+                    100,
+                )
+                y_line = slope * x_line + intercept
+
+                ax.plot(
+                    x_line,
+                    y_line,
+                    linewidth=2,
+                    label=f"Fit: y={slope:.2f}x{intercept:+.3f}",
+                )
+
+            title = (
+                f"{self._td.stimulus}: cell {cell} "
+                f"(n={valid.sum()} conditions)"
+            )
+
+        if valid.sum() > 0:
+            lower = min(np.min(x[valid]), np.min(y[valid]))
+            upper = max(np.max(x[valid]), np.max(y[valid]))
+
+            margin = 0.05 * max(upper - lower, 1e-3)
+            lower -= margin
+            upper += margin
+
+            ax.plot(
+                [lower, upper],
+                [lower, upper],
+                linestyle="--",
+                linewidth=1,
+                label="Run = still",
+            )
+
+            ax.set_xlim(lower, upper)
+            ax.set_ylim(lower, upper)
+
+        ax.set_xlabel("Mean response during still trials")
+        ax.set_ylabel("Mean response during running trials")
+        ax.set_title(title)
+        ax.legend(frameon=False)
+
+        return fig
 
     def plot_mi_histogram(self, ax=None) -> plt.Figure:
         """Histogram of Modulation Index across the population.
@@ -667,7 +920,28 @@ class BinaryModulation:
         Optionally mark the median MI and compare to a null distribution
         (e.g. shuffle labels).
         """
-        raise NotImplementedError
+        if self.mi is None:
+            self.compute_mi()
+
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(5, 4))
+        else:
+            fig = ax.figure
+
+        valid_mi = self.mi[np.isfinite(self.mi)]
+
+        ax.hist(valid_mi, bins=20, alpha=0.8)
+        median_mi = np.nanmedian(valid_mi)
+
+        ax.axvline(median_mi, linestyle="--", color="black", label=f"median={median_mi:.3f}")
+        ax.axvline(0, linestyle=":", color="gray")
+
+        ax.set_xlabel("Modulation Index")
+        ax.set_ylabel("Number of cells")
+        ax.set_title(f"{self._td.stimulus}: MI distribution")
+        ax.legend()
+
+        return fig
 
 
 # ==============================================================================
