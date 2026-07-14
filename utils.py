@@ -474,7 +474,7 @@ class Plotter:
 # colour scheme for monotonicity categories
 POS_COLOR = '#E74C3C'                        # positive  (red)
 NEG_COLOR = '#3498DB'                        # negative  (blue)
-NM_COLOR  = "#6A8B6D"                        # non-monotonic (teal)
+NM_COLOR  = "#8BB38F"                        # non-monotonic (teal)
 OTHER_COLOR = '#7f7f7f'                      # "Others" in condition plots
 
 
@@ -762,6 +762,41 @@ class SpeedTuning:
             print(f"{key} tuned neurons: #{mask.sum()} \n {np.where(mask)[0]}")
             print(self.rho[mask].round(3))
 
+    def _plot_tuning_curve(self, responses, ylabel, figsize, semcolor, label, ax):
+        """Shared core: plot mean ± SEM tuning curve from a response matrix.
+
+        Parameters
+        ----------
+        responses : np.ndarray, shape (n_cells, n_bins)
+            Response values to average and plot.
+        ylabel : str
+            Y-axis label.
+        figsize : tuple
+        semcolor : str or None
+        label : str or None
+        ax : plt.Axes or None
+
+        Returns
+        -------
+        plt.Axes
+        """
+        assert self.bins_centers is not None, "call compute_tuning() first"
+        means = responses.mean(axis=0)
+        sem = responses.std(axis=0) / np.sqrt(responses.shape[0])
+
+        if ax is None:
+            _, ax = plt.subplots(figsize=figsize)
+
+        ax.fill_between(self.bins_centers, means - sem, means + sem,
+                        color=semcolor, alpha=0.5, edgecolor='none', label=label)
+        ax.plot(self.bins_centers, means, color=semcolor,
+                marker='o', markersize=3,
+                markerfacecolor='black', markeredgecolor='black')
+        ax.set_xlabel('running speed (cm/s)')
+        ax.set_ylabel(ylabel)
+        return ax
+
+
     def plot_tuning_curve(self, cells: list[int] | None = None, figsize=(5,3), semcolor=None, label=None, ax=None) -> plt.Axes:
         """Plot speed tuning curve with Mean and SEM over the given cells.
 
@@ -779,23 +814,43 @@ class SpeedTuning:
             The axes that were drawn into.
         """
         assert self.mean_all_responses is not None, "call compute_tuning() first"
-        assert self.bins_centers is not None, "call compute_tuning() first"
+        res_cells = self.mean_all_responses[cells] if cells else self.mean_all_responses
+        return self._plot_tuning_curve(res_cells, 'average $\\Delta$F/F',
+                                        figsize, semcolor, label, ax)
 
-        if ax is None:
-            _, ax = plt.subplots(figsize=figsize)
+    def plot_tuning_curve_zscore(self, cells: list[int] | None = None, figsize=(5,3), semcolor=None, label=None, ax=None) -> plt.Axes:
+        """Per-cell z-scored speed tuning curve with Mean and SEM.
+
+        Z-scores each cell's tuning curve before averaging, so the figure
+        shows relative modulation rather than absolute ΔF/F units.
+
+        Parameters
+        ----------
+        cells : list[int] or None, optional
+            Subset of cells to average. None = all cells.
+        figsize : tuple, optional
+        semcolor : str or None, optional
+            Colour for the mean line and SEM shading.
+        label : str or None, optional
+            Legend label for the shaded region.
+        ax : plt.Axes, optional
+            Axes to draw into. Creates a new one if None.
+
+        Returns
+        -------
+        plt.Axes
+        """
+        assert self.mean_all_responses is not None, "call compute_tuning() first"
 
         res_cells = self.mean_all_responses[cells] if cells else self.mean_all_responses
-        means = res_cells.mean(axis=0)
-        sem = res_cells.std(axis=0) / np.sqrt(res_cells.shape[0])
+        mu = res_cells.mean(axis=1, keepdims=True)
+        sd = res_cells.std(axis=1, keepdims=True)
+        sd = np.where(sd == 0, 1.0, sd)
+        res_z = (res_cells - mu) / sd
 
-        ax.fill_between(self.bins_centers, means - sem, means + sem,
-                        color=semcolor, alpha=0.5, edgecolor='none', label=label)
-        ax.plot(self.bins_centers, means, color=semcolor,
-                marker='o', markersize=3,
-                markerfacecolor='black', markeredgecolor='black')
-        ax.set_xlabel('running speed (cm/s)')
-        ax.set_ylabel('average $\\Delta$F/F')
-        return ax
+        return self._plot_tuning_curve(res_z, 'z-score',
+                                        figsize, semcolor, label, ax)
+
 
     def _plot_tuning_by_monotonicity(self, responses, ylabel, axes, figsize, cells=None):
         """Shared core: plot 3-panel monotonicity figure from a response matrix.
@@ -869,7 +924,8 @@ class SpeedTuning:
                         markerfacecolor='black', markeredgecolor='black')
 
             rho_mean = rho[mask].mean() if n > 0 else float('nan')
-            ax.set_title(f'{label} (# {n}, $\\bar{{\\rho}}$={rho_mean:.3f})')
+            rho_str = f'{np.abs(rho_mean):.3f}'.replace('0.', '.', 1)
+            ax.set_title(f'{label} (# {n}, |$\\bar{{\\rho}}$|={rho_str})')
             ax.set_ylabel('')
 
         axes[0].set_ylabel(ylabel)
@@ -892,14 +948,14 @@ class SpeedTuning:
         responses_z = (self.mean_all_responses - mu) / sd
 
         return self._plot_tuning_by_monotonicity(
-            responses_z, 'z-scored $\\Delta$F/F', axes, figsize, cells)
+            responses_z, 'z-scored', axes, figsize, cells)
 
 
 def plot_tuning_curves_grid(tunings: dict[str, SpeedTuning],
                              labels: list[str] | None = None,
                              cells: int | list[int] | None = None,
                              figsize=(8, 6),
-                             show_rho: bool = False) -> plt.Figure:
+                             show_rho: bool = False, zscore=False) -> plt.Figure:
     """Plot tuning curves for all stimuli in a 2x2 grid.
 
     Parameters
@@ -932,7 +988,11 @@ def plot_tuning_curves_grid(tunings: dict[str, SpeedTuning],
 
     for i, lbl in enumerate(labels):
         ax = axes.flat[i]
-        tunings[lbl].plot_tuning_curve(cells=cells, ax=ax, semcolor='gray')
+        if zscore:
+            tunings[lbl].plot_tuning_curve_zscore(cells=cells, ax=ax, semcolor='gray')
+        else:
+            tunings[lbl].plot_tuning_curve(cells=cells, ax=ax, semcolor='gray')
+            ax.set_ylim(bottom=0)
         title = lbl
         if show_rho:
             t = tunings[lbl]
@@ -940,7 +1000,6 @@ def plot_tuning_curves_grid(tunings: dict[str, SpeedTuning],
             rho_vals = t.rho[cells] if cells else t.rho
             title += f'  ($\\bar{{\\rho}}$={rho_vals.mean():.3f})'
         ax.set_title(title)
-        ax.set_ylim(bottom=0)
 
     # x label only on bottom row
     for ax in axes[1, :]:
@@ -948,8 +1007,6 @@ def plot_tuning_curves_grid(tunings: dict[str, SpeedTuning],
     for ax in axes[0, :]:
         ax.set_xlabel('')
     # y label only on left column
-    for ax in axes[:, 0]:
-        ax.set_ylabel('average $\\Delta$F/F')
     for ax in axes[:, 1]:
         ax.set_ylabel('')
 
@@ -1090,9 +1147,29 @@ def plot_rho_pairwise_scatter(tuning_a: SpeedTuning, tuning_b: SpeedTuning,
 
 def plot_monotonicity_grid(tunings: dict[str, SpeedTuning],
                             responsive: dict[str, np.ndarray] | None = None,
-                            figsize=(6, 10)) -> plt.Figure:
+                            speed_tuned: dict[str, np.ndarray] | None = None,
+                            figsize=(6, 10),
+                            legend_headers: dict[str, str] | None = None) -> plt.Figure:
     """Grey background for responsive cells, coloured ρ text (by monotonicity
-    category) with alpha = |ρ| for speed-tuned cells."""
+    category) with alpha = |ρ| for speed-tuned cells.
+
+    Parameters
+    ----------
+    tunings : dict[str, SpeedTuning]
+        SpeedTuning results per stimulus label.
+    responsive : dict[str, np.ndarray] | None
+        Per-stimulus boolean masks ``(n_cells,)`` for stimulus-driven responsive
+        cells (grey background).
+    speed_tuned : dict[str, np.ndarray] | None
+        Per-stimulus boolean masks ``(n_cells,)`` for speed-tuned cells (diagonal
+        hatch overlay).
+    figsize : tuple
+        Figure size.
+    legend_headers : dict[str, str] | None
+        Insert section header text before a legend entry. Keys are existing legend
+        labels (e.g. ``'responsive'``), values are the header text to place above
+        them (e.g. ``{'responsive': 'from metadata'}``).
+    """
     labels = list(tunings.keys())
     # assert all tunings have computed results
     for t in tunings.values():
@@ -1138,6 +1215,14 @@ def plot_monotonicity_grid(tunings: dict[str, SpeedTuning],
     order = np.lexsort((-n_resp, -mean_abs_rho, -global_cat))
     resp_mask = resp_mask[order]
 
+    # --- speed-tuned mask (same ordering) ---
+    st_mask = np.zeros((I, J), dtype=bool)
+    if speed_tuned is not None:
+        for j, lbl in enumerate(labels):
+            if lbl in speed_tuned:
+                st_mask[:, j] = speed_tuned[lbl]
+    st_mask = st_mask[order]
+
     # --- Plot ---
     fig, ax = plt.subplots(figsize=figsize)
 
@@ -1145,6 +1230,16 @@ def plot_monotonicity_grid(tunings: dict[str, SpeedTuning],
     img = np.ones((I, J, 3))
     img[resp_mask] = LG
     ax.imshow(img, aspect='auto', interpolation='nearest')
+
+    # diagonal hatching for speed-tuned cells (under the text)
+    from matplotlib.patches import Rectangle
+    if speed_tuned is not None:
+        for i in range(I):
+            for j in range(J):
+                if st_mask[i, j]:
+                    ax.add_patch(Rectangle((j - 0.5, i - 0.5), 1, 1,
+                                           fill=False, hatch='///', linewidth=0,
+                                           color='black', alpha=0.3))
 
     # coloured ρ text with alpha = |ρ|
     for i in range(I):
@@ -1172,12 +1267,41 @@ def plot_monotonicity_grid(tunings: dict[str, SpeedTuning],
     ax.xaxis.set_ticks_position('top')
     ax.xaxis.set_label_position('top')
 
+    # legend
+    from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
-    ax.legend(
-        [Patch(facecolor=COLS['positive']), Patch(facecolor=COLS['negative']),
-         Patch(facecolor=COLS['non-monotonic']), Patch(facecolor=LG)],
-        ['positive', 'negative', 'non-monotonic', 'responsive'],
-        loc='upper left', bbox_to_anchor=(1.02, 1), fontsize=9, frameon=False)
+    legend_handles = [
+        Patch(facecolor=COLS['positive']),
+        Patch(facecolor=COLS['negative']),
+        Patch(facecolor=COLS['non-monotonic']),
+        Patch(facecolor=LG),
+    ]
+    legend_labels = ['positive', 'negative', 'non-monotonic', 'responsive']
+    if speed_tuned is not None:
+        legend_handles.append(Patch(facecolor='none', hatch='///', linewidth=0,
+                                    edgecolor='black'))
+        legend_labels.append('speed-tuned')
+
+    # insert section headers before specified entries
+    if legend_headers:
+        padded_handles = []
+        padded_labels = []
+        for h, l in zip(legend_handles, legend_labels):
+            if l in legend_headers:
+                # blank spacer line
+                padded_handles.append(
+                    Line2D([], [], color='none', marker='none', linestyle=''))
+                padded_labels.append('')
+                # section header text
+                padded_handles.append(
+                    Line2D([], [], color='none', marker='none', linestyle=''))
+                padded_labels.append(legend_headers[l])
+            padded_handles.append(h)
+            padded_labels.append(l)
+        legend_handles, legend_labels = padded_handles, padded_labels
+
+    ax.legend(legend_handles, legend_labels,
+              loc='upper left', bbox_to_anchor=(1.02, 1), fontsize=9, frameon=False)
     fig.tight_layout()
     return fig
 
