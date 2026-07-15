@@ -3,6 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
 from dataclasses import dataclass
+from scipy.stats import spearmanr, wilcoxon
 
 STIMULI = ['drifting_gratings', 'static_gratings', 'natural_scenes', 'spontaneous']
 def check_stim(stimulus:str):
@@ -879,6 +880,7 @@ class BinaryModulation:
                 ax.plot(
                     x_line,
                     y_line,
+                    color="black",
                     linewidth=2,
                     label=f"Fit: y={slope:.2f}x{intercept:+.3f}",
                 )
@@ -896,12 +898,14 @@ class BinaryModulation:
             lower -= margin
             upper += margin
 
+            identity_kwargs = dict(linestyle="--", linewidth=1, label="Run = still")
+            if cell is not None:
+                identity_kwargs["color"] = "gray"
+
             ax.plot(
                 [lower, upper],
                 [lower, upper],
-                linestyle="--",
-                linewidth=1,
-                label="Run = still",
+                **identity_kwargs,
             )
 
             ax.set_xlim(lower, upper)
@@ -942,6 +946,556 @@ class BinaryModulation:
         ax.legend()
 
         return fig
+
+
+# ==============================================================================
+# Analysis 2 — batch pipeline & reporting helpers
+# ==============================================================================
+
+
+def run_binary_modulation_analysis(
+    data,
+    response_windows,
+    run_threshold: float = 3.0,
+    still_threshold: float = 0.5,
+    min_trials_per_state: int = 1,
+) -> dict:
+    """Run the full binary running/still pipeline for each stimulus.
+
+    For every stimulus in ``response_windows``, extracts trial-aligned
+    responses via :func:`extract_trials` (stimuli are kept separate — no
+    trials are pooled across stimulus classes), builds a
+    :class:`BinaryModulation` analysis, classifies trials into
+    running/still/ignored, computes the modulation index, and fits the
+    condition-level gain model.
+
+    Parameters
+    ----------
+    data : dict
+        Data dictionary returned by :func:`load_data`.
+    response_windows : dict[str, tuple]
+        Mapping stimulus -> ``(offset, duration)`` passed to
+        :func:`extract_trials`.
+    run_threshold, still_threshold : float
+        Passed to :meth:`BinaryModulation.classify_trials`.
+    min_trials_per_state : int
+        Passed to :meth:`BinaryModulation.fit_gain_model`.
+
+    Returns
+    -------
+    dict
+        Mapping stimulus -> fitted :class:`BinaryModulation` instance.
+    """
+    results = {}
+    for stimulus, response_window in response_windows.items():
+        trial_data = extract_trials(
+            data=data,
+            stimulus=stimulus,
+            response_window=response_window,
+        )
+
+        analysis = BinaryModulation(trial_data)
+        analysis.classify_trials(
+            run_threshold=run_threshold,
+            still_threshold=still_threshold,
+        )
+        analysis.compute_mi()
+        analysis.fit_gain_model(min_trials_per_state=min_trials_per_state)
+
+        results[stimulus] = analysis
+
+    return results
+
+
+def get_robust_mi(analysis: BinaryModulation, denom_threshold: float = 1e-3):
+    """Return raw MI together with a robust-cell mask.
+
+    A cell is "robust" if its MI is finite, its denominator
+    (:math:`R_{\\text{run}} + R_{\\text{still}}`) is finite, and
+    :math:`|R_{\\text{run}} + R_{\\text{still}}| > \\text{denom\\_threshold}`.
+    This is a *filter*, not a normalization of MI itself.
+
+    Parameters
+    ----------
+    analysis : BinaryModulation
+        Analysis with :meth:`compute_mi` already run.
+    denom_threshold : float, optional
+        Minimum allowed ``|R_run + R_still|``, by default ``1e-3``.
+
+    Returns
+    -------
+    mi : np.ndarray, shape (n_cells,)
+        Raw modulation index (unchanged).
+    robust : np.ndarray of bool, shape (n_cells,)
+        Mask of cells passing the robustness filter.
+    """
+    mi = analysis.mi
+    denom = analysis.r_run + analysis.r_still
+
+    robust = (
+        np.isfinite(mi)
+        & np.isfinite(denom)
+        & (np.abs(denom) > denom_threshold)
+    )
+
+    return mi, robust
+
+
+def summarize_binary_modulation_runs(results: dict) -> pd.DataFrame:
+    """Compact per-stimulus sanity-check table for a batch of analyses.
+
+    Parameters
+    ----------
+    results : dict
+        Mapping stimulus -> :class:`BinaryModulation`, as returned by
+        :func:`run_binary_modulation_analysis`.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns: stimulus, n_trials, n_running, n_still, n_ignored,
+        median_MI, valid_gain_fits.
+    """
+    rows = []
+    for stimulus, analysis in results.items():
+        rows.append({
+            "stimulus": stimulus,
+            "n_trials": int(len(analysis.run_mask)),
+            "n_running": int(analysis.run_mask.sum()),
+            "n_still": int(analysis.still_mask.sum()),
+            "n_ignored": int(analysis.ignored_mask.sum()),
+            "median_MI": float(np.nanmedian(analysis.mi)),
+            "valid_gain_fits": int(np.isfinite(analysis.gain_a).sum()),
+        })
+    return pd.DataFrame(rows)
+
+
+def summarize_mi_by_stimulus(results: dict, denom_threshold: float = 1e-3) -> pd.DataFrame:
+    """Per-stimulus summary of raw vs. robust modulation index.
+
+    Parameters
+    ----------
+    results : dict
+        Mapping stimulus -> :class:`BinaryModulation`.
+    denom_threshold : float, optional
+        Passed to :func:`get_robust_mi`, by default ``1e-3``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns: stimulus, n_cells, n_robust, n_excluded, median_MI_raw,
+        median_MI_robust, mean_MI_robust, median_delta_R,
+        frac_positive_MI_robust.
+    """
+    rows = []
+    for stimulus, analysis in results.items():
+        mi, robust = get_robust_mi(analysis, denom_threshold)
+        finite = np.isfinite(mi)
+        delta = analysis.r_run - analysis.r_still
+
+        rows.append({
+            "stimulus": stimulus,
+            "n_cells": len(mi),
+            "n_robust": int(robust.sum()),
+            "n_excluded": int(finite.sum() - robust.sum()),
+            "median_MI_raw": float(np.nanmedian(mi[finite])),
+            "median_MI_robust": float(np.nanmedian(mi[robust])),
+            "mean_MI_robust": float(np.nanmean(mi[robust])),
+            "median_delta_R": float(np.nanmedian(delta[robust])),
+            "frac_positive_MI_robust": float(np.mean(mi[robust] > 0)),
+        })
+    return pd.DataFrame(rows)
+
+
+def compare_gratings_vs_natural(results: dict, denom_threshold: float = 1e-3):
+    """Paired grating-vs-natural-scenes comparison of robust MI.
+
+    Trials are never pooled across stimulus classes: MI is computed
+    separately for drifting gratings, static gratings, and natural
+    scenes, and only the resulting per-cell MI values are combined.
+    For each matched cell, grating MI is the mean of the (robust)
+    drifting- and static-grating MI:
+
+    .. math::
+        MI_{\\text{grating}} = \\text{mean}(MI_{\\text{DG}}, MI_{\\text{SG}})
+
+    ``MI_grating`` is then compared against natural-scenes MI with a
+    paired Wilcoxon signed-rank test, using only cells with a valid
+    robust MI for DG, SG, and NS.
+
+    Parameters
+    ----------
+    results : dict
+        Must contain ``"drifting_gratings"``, ``"static_gratings"``, and
+        ``"natural_scenes"`` keys mapping to :class:`BinaryModulation`.
+    denom_threshold : float, optional
+        Passed to :func:`get_robust_mi`, by default ``1e-3``.
+
+    Returns
+    -------
+    result_df : pandas.DataFrame
+        One-row summary of the paired comparison.
+    valid : np.ndarray of bool, shape (n_cells,)
+        Mask of cells used in the comparison.
+    grating_values : np.ndarray
+        Grating MI for the matched, valid cells.
+    natural_values : np.ndarray
+        Natural-scenes MI for the matched, valid cells.
+    """
+    mi_dg, robust_dg = get_robust_mi(results["drifting_gratings"], denom_threshold)
+    mi_sg, robust_sg = get_robust_mi(results["static_gratings"], denom_threshold)
+    mi_ns, robust_ns = get_robust_mi(results["natural_scenes"], denom_threshold)
+
+    mi_grating = np.nanmean(np.vstack([mi_dg, mi_sg]), axis=0)
+    robust_grating = robust_dg & robust_sg & np.isfinite(mi_grating)
+
+    valid = robust_grating & robust_ns & np.isfinite(mi_grating) & np.isfinite(mi_ns)
+
+    grating_values = mi_grating[valid]
+    natural_values = mi_ns[valid]
+
+    stat, p = wilcoxon(grating_values, natural_values)
+
+    result_df = pd.DataFrame([{
+        "comparison": "gratings_vs_natural_scenes",
+        "n_cells": int(valid.sum()),
+        "median_grating_MI": float(np.nanmedian(grating_values)),
+        "median_natural_scene_MI": float(np.nanmedian(natural_values)),
+        "median_difference_NS_minus_grating": float(np.nanmedian(natural_values - grating_values)),
+        "wilcoxon_stat": float(stat),
+        "p_value": float(p),
+        "frac_NS_greater_than_grating": float(np.mean(natural_values > grating_values)),
+    }])
+
+    return result_df, valid, grating_values, natural_values
+
+
+def validate_mi_against_metadata(
+    results: dict,
+    metadata: pd.DataFrame,
+    matched_cell_ids,
+    denom_threshold: float = 1e-3,
+    robust: bool = True,
+):
+    """Validate our MI against Allen's precomputed running-modulation metrics.
+
+    Aligns ``metadata`` to ``matched_cell_ids`` (by ``cell_specimen_id``)
+    and compares, per stimulus, our MI with the corresponding Allen
+    ``run_mod_*`` column using Spearman correlation.
+
+    Parameters
+    ----------
+    results : dict
+        Must contain ``"drifting_gratings"``, ``"static_gratings"``, and
+        ``"natural_scenes"`` keys mapping to :class:`BinaryModulation`.
+    metadata : pandas.DataFrame
+        Table containing ``cell_specimen_id``, ``run_mod_dg``,
+        ``run_mod_sg``, ``run_mod_ns`` columns.
+    matched_cell_ids : array-like
+        Cell IDs defining row order (typically ``data["matched_cell_ids"]``).
+    denom_threshold : float, optional
+        Passed to :func:`get_robust_mi`, by default ``1e-3``.
+    robust : bool, optional
+        If True (default), use robust MI (see :func:`get_robust_mi`).
+        If False, use raw MI with no denominator-based filtering.
+
+    Returns
+    -------
+    validation_df : pandas.DataFrame
+        Columns: stimulus, metadata_col, n_cells, spearman_rho, p_value,
+        median_our_MI, median_metadata_run_mod.
+    aligned : dict
+        Mapping stimulus -> {"mi": array, "ref": array} of the valid,
+        aligned values used for the correlation (and for plotting).
+    """
+    meta = metadata.set_index("cell_specimen_id").loc[matched_cell_ids]
+
+    mapping = {
+        "drifting_gratings": "run_mod_dg",
+        "static_gratings": "run_mod_sg",
+        "natural_scenes": "run_mod_ns",
+    }
+
+    rows = []
+    aligned = {}
+    for stimulus, meta_col in mapping.items():
+        analysis = results[stimulus]
+
+        if robust:
+            mi, robust_mask = get_robust_mi(analysis, denom_threshold)
+        else:
+            mi = analysis.mi
+            robust_mask = np.ones_like(mi, dtype=bool)
+
+        ref = meta[meta_col].to_numpy()
+        valid = robust_mask & np.isfinite(mi) & np.isfinite(ref)
+
+        rho, pval = spearmanr(mi[valid], ref[valid])
+
+        rows.append({
+            "stimulus": stimulus,
+            "metadata_col": meta_col,
+            "n_cells": int(valid.sum()),
+            "spearman_rho": float(rho),
+            "p_value": float(pval),
+            "median_our_MI": float(np.nanmedian(mi[valid])),
+            "median_metadata_run_mod": float(np.nanmedian(ref[valid])),
+        })
+        aligned[stimulus] = {"mi": mi[valid], "ref": ref[valid]}
+
+    return pd.DataFrame(rows), aligned
+
+
+def summarize_gain_model(results: dict) -> pd.DataFrame:
+    """Population summary of the condition-level gain model per stimulus.
+
+    Spontaneous activity is excluded because it has no visual-stimulus
+    condition structure, so the gain model is not defined for it.
+
+    Parameters
+    ----------
+    results : dict
+        Mapping stimulus -> :class:`BinaryModulation`.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns: stimulus, n_valid_gain_fits, median_gain_a, median_gain_b,
+        median_gain_r2, median_n_conditions, frac_gain_a_gt_1.
+    """
+    rows = []
+    for stimulus, analysis in results.items():
+        if stimulus == "spontaneous":
+            continue
+
+        valid = np.isfinite(analysis.gain_a) & np.isfinite(analysis.gain_b)
+
+        rows.append({
+            "stimulus": stimulus,
+            "n_valid_gain_fits": int(valid.sum()),
+            "median_gain_a": float(np.nanmedian(analysis.gain_a[valid])),
+            "median_gain_b": float(np.nanmedian(analysis.gain_b[valid])),
+            "median_gain_r2": float(np.nanmedian(analysis.gain_r2[valid])),
+            "median_n_conditions": float(np.nanmedian(analysis.n_gain_conditions[valid])),
+            "frac_gain_a_gt_1": float(np.mean(analysis.gain_a[valid] > 1)),
+        })
+    return pd.DataFrame(rows)
+
+
+# ------------- plotting -------------
+
+
+def plot_raw_mi_histograms(results: dict):
+    """Plot the raw MI histogram for each stimulus in ``results``.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+    axes : np.ndarray of matplotlib.axes.Axes
+    """
+    n = len(results)
+    fig, axes = plt.subplots(1, n, figsize=(4.5 * n, 4), sharey=True, constrained_layout=True)
+    axes = np.atleast_1d(axes)
+
+    for ax, stimulus in zip(axes, results):
+        results[stimulus].plot_mi_histogram(ax=ax)
+
+    return fig, axes
+
+
+def plot_robust_mi_histograms(results: dict, denom_threshold: float = 1e-3):
+    """Plot the robust MI histogram for each stimulus in ``results``.
+
+    Robust cells satisfy ``|R_run + R_still| > denom_threshold``
+    (see :func:`get_robust_mi`); this is a filter, not a normalization.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+    axes : np.ndarray of matplotlib.axes.Axes
+    """
+    n = len(results)
+    fig, axes = plt.subplots(1, n, figsize=(4 * n, 4), sharey=True)
+    axes = np.atleast_1d(axes)
+
+    for ax, stimulus in zip(axes, results):
+        mi, robust = get_robust_mi(results[stimulus], denom_threshold)
+        mi_robust = mi[robust]
+        median_mi = np.nanmedian(mi_robust)
+
+        ax.hist(mi_robust, bins=20, alpha=0.8)
+        ax.axvline(median_mi, linestyle="--", color="black", label=f"median={median_mi:.3f}")
+        ax.axvline(0, linestyle=":", color="gray")
+
+        ax.set_xlim(-1, 1)
+        ax.set_title(stimulus)
+        ax.set_xlabel("Robust MI")
+        ax.legend(frameon=False)
+
+    axes[0].set_ylabel("Number of cells")
+    return fig, axes
+
+
+def plot_population_response_scatter(results: dict):
+    """Scatter running- vs. still-trial population responses per stimulus.
+
+    One point is one neuron; x = mean still-trial response, y = mean
+    running-trial response. This plot is descriptive, not a significance
+    test on its own.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+    axes : np.ndarray of matplotlib.axes.Axes
+    """
+    n = len(results)
+    fig, axes = plt.subplots(1, n, figsize=(4.5 * n, 4), constrained_layout=True)
+    axes = np.atleast_1d(axes)
+
+    for ax, stimulus in zip(axes, results):
+        results[stimulus].plot_scatter(cell=None, ax=ax)
+
+    return fig, axes
+
+
+def plot_condition_gain_example(analysis: BinaryModulation, cell: int, ax=None):
+    """Plot the condition-level gain fit for one representative cell.
+
+    Thin wrapper around :meth:`BinaryModulation.plot_scatter`.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+    """
+    return analysis.plot_scatter(cell=cell, ax=ax)
+
+
+def plot_grating_natural_paired_scatter(grating_values, natural_values, p_value=None, ax=None):
+    """Paired scatter of grating vs. natural-scenes MI for matched cells.
+
+    Parameters
+    ----------
+    grating_values, natural_values : array-like
+        Matched-cell MI values, e.g. from :func:`compare_gratings_vs_natural`.
+    p_value : float, optional
+        Wilcoxon p-value to annotate in the title.
+    ax : matplotlib.axes.Axes, optional
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+    ax : matplotlib.axes.Axes
+    """
+    grating_values = np.asarray(grating_values, dtype=float)
+    natural_values = np.asarray(natural_values, dtype=float)
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(5, 5))
+    else:
+        fig = ax.figure
+
+    ax.scatter(grating_values, natural_values, alpha=0.75)
+
+    lower = min(np.min(grating_values), np.min(natural_values))
+    upper = max(np.max(grating_values), np.max(natural_values))
+    margin = 0.05 * max(upper - lower, 1e-3)
+    lower -= margin
+    upper += margin
+
+    ax.plot([lower, upper], [lower, upper], linestyle="--", linewidth=1, color="gray", label="NS = gratings")
+    ax.set_xlim(lower, upper)
+    ax.set_ylim(lower, upper)
+
+    ax.set_xlabel("Gratings MI: mean(DG, SG)")
+    ax.set_ylabel("Natural scenes MI")
+    title = f"Gratings vs natural scenes\nn={len(grating_values)}"
+    if p_value is not None:
+        title += f", p={p_value:.3g}"
+    ax.set_title(title)
+    ax.legend(frameon=False)
+
+    return fig, ax
+
+
+def plot_grating_natural_paired_distribution(grating_values, natural_values, p_value=None, ax=None):
+    """Paired boxplot + per-cell connecting lines for grating vs. NS MI.
+
+    Parameters
+    ----------
+    grating_values, natural_values : array-like
+        Matched-cell MI values, e.g. from :func:`compare_gratings_vs_natural`.
+    p_value : float, optional
+        Wilcoxon p-value to annotate in the title.
+    ax : matplotlib.axes.Axes, optional
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+    ax : matplotlib.axes.Axes
+    """
+    grating_values = np.asarray(grating_values, dtype=float)
+    natural_values = np.asarray(natural_values, dtype=float)
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(5, 4))
+    else:
+        fig = ax.figure
+
+    ax.boxplot(
+        [grating_values, natural_values],
+        tick_labels=["Gratings\nmean(DG, SG)", "Natural\nscenes"],
+        showfliers=False,
+    )
+
+    for g, n in zip(grating_values, natural_values):
+        ax.plot([1, 2], [g, n], color="gray", alpha=0.25, linewidth=0.8)
+
+    ax.axhline(0, linestyle=":", color="gray")
+    ax.set_ylabel("Robust MI")
+    title = "Paired MI comparison"
+    if p_value is not None:
+        title += f"\nWilcoxon p={p_value:.3g}"
+    ax.set_title(title)
+
+    return fig, ax
+
+
+def plot_metadata_validation(aligned: dict, validation_df: pd.DataFrame = None):
+    """Scatter our MI against Allen ``run_mod_*`` metadata, per stimulus.
+
+    Parameters
+    ----------
+    aligned : dict
+        Mapping stimulus -> {"mi": array, "ref": array}, as returned by
+        :func:`validate_mi_against_metadata`.
+    validation_df : pandas.DataFrame, optional
+        Table with ``stimulus``, ``spearman_rho``, ``p_value``, ``n_cells``
+        columns, used to annotate each panel's title.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+    axes : np.ndarray of matplotlib.axes.Axes
+    """
+    stimuli = list(aligned)
+    fig, axes = plt.subplots(1, len(stimuli), figsize=(4.5 * len(stimuli), 4), constrained_layout=True)
+    axes = np.atleast_1d(axes)
+
+    for ax, stimulus in zip(axes, stimuli):
+        mi = aligned[stimulus]["mi"]
+        ref = aligned[stimulus]["ref"]
+
+        ax.scatter(ref, mi, alpha=0.75)
+
+        title = stimulus
+        if validation_df is not None:
+            row = validation_df.loc[validation_df["stimulus"] == stimulus].iloc[0]
+            title += f"\nrho={row['spearman_rho']:.2f}, p={row['p_value']:.2g}, n={int(row['n_cells'])}"
+        ax.set_title(title)
+        ax.set_xlabel("Allen run_mod (metadata)")
+        ax.set_ylabel("Robust MI (ours)")
+
+    return fig, axes
 
 
 # ==============================================================================
