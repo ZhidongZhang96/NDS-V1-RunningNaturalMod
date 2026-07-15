@@ -54,10 +54,11 @@ Owns `utils.py` L476–791 + the Phase-0 reducers. (Note: actual implementation 
 - [x] **A3** `compute_spearman()` (L699–736) → `rho`, `rho_p_values` (`scipy.stats.spearmanr`). Also categorizes monotonicity (positive/negative/non-monotonic) with `rho_threshold` and `p_threshold` parameters.
 - [x] **A4** `plot_tuning_curve(cells=None)` (L741–777) — average ± SEM over given cells or all cells.
 - [x] **A5** `print_tuned_cells()` (L779–791) — prints counts and ρ values per monotonicity category. Replaces the originally planned `plot_significant_neurons()`.
-- [x] **A6** Run A1–A3 **separately for each stimulus** (dg, sg, ns, spontaneous — never pooled); report numbers of significantly-tuned cells per stimulus, consider responsive cells via `p_dg/p_sg/p_ns` before interpreting fractions. **→ [SpeedTuning.md](SpeedTuning.md)**
+- [x] **A6** Run A1–A3 **separately for each stimulus** (dg, sg, ns, spontaneous — never pooled); report numbers of significantly-tuned cells per stimulus, consider responsive cells via `p_dg/p_sg/p_ns` before interpreting fractions. 
 
-- [ ] **A7 (stretch)** Port Christensen's tuning-shape classifier (`gaus_model_comparison`).
-**Done when:** per-stimulus significant-tuned fraction produced; sign of `rho` broadly agrees with `neurons_metadata.csv` responsiveness (`p_dg/p_sg/p_ns`). **Status: DONE (A1–A6 complete).**
+**Done when:** per-stimulus significant-tuned fraction produced; sign of `rho` broadly agrees with `neurons_metadata.csv` responsiveness (`p_dg/p_sg/p_ns`).
+
+**Status: DONE → [SpeedTuning.md](SpeedTuning.md)**
 
 ---
 
