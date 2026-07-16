@@ -117,6 +117,18 @@ def get_condition_intervals(epoch_table: pd.DataFrame, conditions=None) -> dict:
 
     return intervals_dict
 
+def _plot_mean_sem(ax, x, data, color, alpha=0.5, label=None,
+                   linestyle='-', marker_facecolor='black',
+                   marker_edgecolor='black'):
+    """Plot mean ± SEM as fill_between + line with markers."""
+    m = data.mean(axis=0)
+    s = data.std(axis=0) / np.sqrt(data.shape[0])
+    ax.fill_between(x, m - s, m + s, color=color, alpha=alpha,
+                    edgecolor='none', label=label)
+    ax.plot(x, m, color=color, marker='o', markersize=3,
+            markerfacecolor=marker_facecolor, markeredgecolor=marker_edgecolor,
+            linestyle=linestyle)
+
 
 # ==============================================================================
 # Trial Extraction
@@ -472,9 +484,9 @@ class Plotter:
 # ==============================================================================
 
 # colour scheme for monotonicity categories
-POS_COLOR = '#E74C3C'                        # positive  (red)
-NEG_COLOR = '#3498DB'                        # negative  (blue)
-NM_COLOR  = "#8BB38F"                        # non-monotonic (teal)
+POS_COLOR = "#E7402D"                        # positive  (red)
+NEG_COLOR = "#2492DC"                        # negative  (blue)
+NM_COLOR  = "#71AD77"                        # non-monotonic (teal)
 OTHER_COLOR = '#7f7f7f'                      # "Others" in condition plots
 
 
@@ -620,32 +632,32 @@ class SpeedTuning:
 
         return bins_edges, bins_ids, mean_all_responses
 
-def _subsample(self, max_per_bin=None, seed=42):
-    """Subsample high-count bins to reduce speed-distribution imbalance.
+    def _subsample(self, max_per_bin=None, seed=42):
+        """Subsample high-count bins to reduce speed-distribution imbalance.
 
-    Marks dropped trials by setting their bin id to -1 in ``self.bins_sub_ids``.
-    """
-    assert self.bins_ids is not None
-    bins_ids = self.bins_ids.copy()  # (n_trials_total,)
+        Marks dropped trials by setting their bin id to -1 in ``self.bins_sub_ids``.
+        """
+        assert self.bins_ids is not None
+        bins_ids = self.bins_ids.copy()  # (n_trials_total,)
 
-    ids, counts = np.unique(bins_ids, return_counts=True)
-    if max_per_bin is None:
-        # If there's only one occupied bin, subsampling is undefined; keep all trials.
-        if len(counts) < 2:
-            self.bins_sub_ids = bins_ids
-            return
-        max_per_bin = np.partition(counts, -2)[-2]  # 2nd-largest occupied-bin count
+        ids, counts = np.unique(bins_ids, return_counts=True)
+        if max_per_bin is None:
+            # If there's only one occupied bin, subsampling is undefined; keep all trials.
+            if len(counts) < 2:
+                self.bins_sub_ids = bins_ids
+                return
+            max_per_bin = np.partition(counts, -2)[-2]  # 2nd-largest occupied-bin count
 
-    rng = np.random.default_rng(seed)
-    count_map = dict(zip(ids, counts))
-    for bid in ids:
-        if count_map[bid] > max_per_bin:
-            trials = np.where(bins_ids == bid)[0]
-            selected = rng.choice(trials, size=max_per_bin, replace=False)
-            unselected = np.setdiff1d(trials, selected)
-            bins_ids[unselected] = -1
+        rng = np.random.default_rng(seed)
+        count_map = dict(zip(ids, counts))
+        for bid in ids:
+            if count_map[bid] > max_per_bin:
+                trials = np.where(bins_ids == bid)[0]
+                selected = rng.choice(trials, size=max_per_bin, replace=False)
+                unselected = np.setdiff1d(trials, selected)
+                bins_ids[unselected] = -1
 
-    self.bins_sub_ids = bins_ids
+        self.bins_sub_ids = bins_ids
 
 
     # ------------- core computation -------------
@@ -708,7 +720,11 @@ def _subsample(self, max_per_bin=None, seed=42):
         # shuffled — permute bin labels, re-compute variance
         vs_shuffled = []
         for _ in range(n_shuffles):
-            shuffled_bins_ids = np.random.permutation(self.bins_sub_ids)
+            # only shuffle non-(-1) bin ids; -1 (excluded trials) stay fixed
+            shuffled_bins_ids = self.bins_sub_ids.copy()
+            valid_mask = shuffled_bins_ids != -1
+            valid_ids = shuffled_bins_ids[valid_mask]
+            shuffled_bins_ids[valid_mask] = np.random.permutation(valid_ids)
             _, _, mean_all_res = self._binned_responses(bins_ids=shuffled_bins_ids) # (n_cells, n_bins)
             vs_shuffled.append(mean_all_res.var(axis=1))
         vs_shuffled = np.array(vs_shuffled).T   # (n_cells, n_shuffles)
@@ -739,7 +755,12 @@ def _subsample(self, max_per_bin=None, seed=42):
         seq_speed_ids = self.bins_sub_ids   # (n_trials_total)
         seq_responses = self.responses  # (n_cells, n_trials_total)
 
-        combined_mat = np.vstack([seq_speed_ids, seq_responses])    # (1+n_cells, n_trials_total)
+        # drop excluded trials (-1) before Spearman correlation
+        valid_mask = seq_speed_ids != -1
+        seq_speed_ids = seq_speed_ids[valid_mask]
+        seq_responses = seq_responses[:, valid_mask]
+
+        combined_mat = np.vstack([seq_speed_ids, seq_responses])    # (1+n_cells, n_valid_trials)
         res = spearmanr(combined_mat, axis=1)
 
         rho = res.statistic[0, 1:]          # (n_cells,)
@@ -790,17 +811,12 @@ def _subsample(self, max_per_bin=None, seed=42):
         plt.Axes
         """
         assert self.bins_centers is not None, "call compute_tuning() first"
-        means = responses.mean(axis=0)
-        sem = responses.std(axis=0) / np.sqrt(responses.shape[0])
 
         if ax is None:
             _, ax = plt.subplots(figsize=figsize)
 
-        ax.fill_between(self.bins_centers, means - sem, means + sem,
-                        color=semcolor, alpha=0.5, edgecolor='none', label=label)
-        ax.plot(self.bins_centers, means, color=semcolor,
-                marker='o', markersize=3,
-                markerfacecolor='black', markeredgecolor='black')
+        _plot_mean_sem(ax, self.bins_centers, responses, semcolor,
+                       label=label)
         ax.set_xlabel('running speed (cm/s)')
         ax.set_ylabel(ylabel)
         return ax
@@ -861,7 +877,8 @@ def _subsample(self, max_per_bin=None, seed=42):
                                         figsize, semcolor, label, ax)
 
 
-    def _plot_tuning_by_monotonicity(self, responses, ylabel, axes, figsize, cells=None):
+    def _plot_tuning_by_monotonicity(self, responses, ylabel, axes, figsize,
+                                     cells=None, spont_responses=None):
         """Shared core: plot 3-panel monotonicity figure from a response matrix.
 
         Parameters
@@ -874,6 +891,10 @@ def _subsample(self, max_per_bin=None, seed=42):
         figsize : tuple
         cells : list[int] or None, optional
             Subset of cells to plot. None = all cells.
+        spont_responses : np.ndarray or None, optional
+            Spontaneous tuning responses of the same cells, shape (n_cells, n_bins).
+            When provided, each subplot shows the spontaneous tuning of its category
+            as a baseline (same type of color) instead of non-significant cells (gray).
 
         Returns
         -------
@@ -884,11 +905,14 @@ def _subsample(self, max_per_bin=None, seed=42):
         assert self.monotonic_mask is not None and self.rho is not None, "call compute_spearman() first"
 
         if cells is not None:
-            cells = list(cells) if not isinstance(cells, int) else [cells]
-            responses = responses[cells]
-            bg = ~self.significant_mask[cells]
-            rho = self.rho[cells]
-            masks = {k: self.monotonic_mask[k][cells] for k in ('positive', 'negative', 'non-monotonic')}
+            cells_arr = list(cells) if not isinstance(cells, int) else [cells]
+            responses = responses[cells_arr]
+            if spont_responses is not None:
+                spont_responses = spont_responses[cells_arr]
+            bg = ~self.significant_mask[cells_arr]
+            rho = self.rho[cells_arr]
+            masks = {k: self.monotonic_mask[k][cells_arr]
+                     for k in ('positive', 'negative', 'non-monotonic')}
         else:
             bg = ~self.significant_mask
             rho = self.rho
@@ -910,45 +934,91 @@ def _subsample(self, max_per_bin=None, seed=42):
             n = mask.sum()
             label = 'non-mono' if key == 'non-monotonic' else key
 
-            # non-significant cells as grey background
-            if bg.any():
-                r = responses[bg]
-                m = r.mean(axis=0)
-                s = r.std(axis=0) / np.sqrt(r.shape[0])
-                ax.fill_between(self.bins_centers, m - s, m + s,
-                                color='lightgray', alpha=0.5, edgecolor='none')
-                ax.plot(self.bins_centers, m, color='lightgray',
-                        marker='o', markersize=3,
-                        markerfacecolor='black', markeredgecolor='black')
+            if spont_responses is not None:
+                # spontaneous tuning of the same category cells with hollow markers as baseline
+                if n > 0:
+                    _plot_mean_sem(ax, self.bins_centers, spont_responses[mask],
+                                   color, alpha=0.15, linestyle='--',
+                                   marker_facecolor='none')
+            else:
+                # non-significant cells as grey background
+                if bg.any():
+                    _plot_mean_sem(ax, self.bins_centers, responses[bg],
+                                   'lightgray', alpha=0.5)
 
             # category cells in colour
             if n > 0:
-                r = responses[mask]
-                m = r.mean(axis=0)
-                s = r.std(axis=0) / np.sqrt(r.shape[0])
-                ax.fill_between(self.bins_centers, m - s, m + s,
-                                color=color, alpha=0.5, edgecolor='none')
-                ax.plot(self.bins_centers, m, color=color,
-                        marker='o', markersize=3,
-                        markerfacecolor='black', markeredgecolor='black')
+                _plot_mean_sem(ax, self.bins_centers, responses[mask],
+                               color, alpha=0.5)
 
             rho_mean = rho[mask].mean() if n > 0 else float('nan')
-            rho_str = f'{np.abs(rho_mean):.3f}'.replace('0.', '.', 1)
-            ax.set_title(f'{label} (# {n}, |$\\bar{{\\rho}}$|={rho_str})')
+            if np.isnan(rho_mean):
+                ax.set_title(f'{label} (n={n})')
+            else:
+                rho_str = f'{np.abs(rho_mean):.3f}'.replace('0.', '.', 1)
+                ax.set_title(f'{label} (n={n}, |$\\bar{{\\rho}}$|={rho_str})')
             ax.set_ylabel('')
 
         axes[0].set_ylabel(ylabel)
         fig.tight_layout(rect=(0, 0, 1, 0.94))
+
+        # legend: evoked vs spont line styles
+        from matplotlib.lines import Line2D
+        legend_handles = [
+            Line2D([], [], color='black', marker='o', markersize=3,
+                   markerfacecolor='black', markeredgecolor='black'),
+            Line2D([], [], color='black', marker='o', markersize=3,
+                   markerfacecolor='none', markeredgecolor='black',
+                   linestyle='--'),
+        ]
+        legend_labels = ['Evoked', 'Spont']
+        fig.legend(legend_handles, legend_labels, loc='upper center',
+                   ncol=2, fontsize=12, frameon=False,
+                   bbox_to_anchor=(0.5, 0.96))
+
         return fig
 
-    def plot_tuning_by_monotonicity(self, axes=None, figsize=(10, 3.5), cells=None) -> plt.Figure:
-        """Subplots: tuning curves for positive / negative / non-monotonic cells separately."""
-        assert self.mean_all_responses is not None, "call compute_tuning() first"
-        return self._plot_tuning_by_monotonicity(
-            self.mean_all_responses, 'average $\\Delta$F/F', axes, figsize, cells)
+    def plot_tuning_by_monotonicity(self, axes=None, figsize=(10, 3.5),
+                                    cells=None, spontaneous: 'SpeedTuning | None' = None) -> plt.Figure:
+        """Subplots: tuning curves for positive / negative / non-monotonic cells separately.
 
-    def plot_tuning_by_monotonicity_zscore(self, axes=None, figsize=(10, 3.5), cells=None) -> plt.Figure:
-        """Subplots with per-cell z-scored tuning curves for each monotonicity category."""
+        Parameters
+        ----------
+        axes : array-like of 3 Axes or None, optional
+        figsize : tuple, optional
+        cells : list[int] or None, optional
+        spontaneous : SpeedTuning or None, optional
+            A SpeedTuning instance for spontaneous activity. When provided, each
+            subplot shows the spontaneous tuning of its category as a gray baseline.
+
+        Returns
+        -------
+        plt.Figure
+        """
+        assert self.mean_all_responses is not None, "call compute_tuning() first"
+        spont_resps = spontaneous.mean_all_responses if spontaneous is not None else None
+        return self._plot_tuning_by_monotonicity(
+            self.mean_all_responses, 'average $\\Delta$F/F', axes, figsize, cells,
+            spont_responses=spont_resps)
+
+    def plot_tuning_by_monotonicity_zscore(self, axes=None, figsize=(10, 3.5),
+                                           cells=None, spontaneous: 'SpeedTuning | None' = None) -> plt.Figure:
+        """Subplots with per-cell z-scored tuning curves for each monotonicity category.
+
+        Parameters
+        ----------
+        axes : array-like of 3 Axes or None, optional
+        figsize : tuple, optional
+        cells : list[int] or None, optional
+        spontaneous : SpeedTuning or None, optional
+            A SpeedTuning instance for spontaneous activity. When provided, each
+            subplot shows the spontaneous tuning of its category as a gray baseline
+            (also z-scored).
+
+        Returns
+        -------
+        plt.Figure
+        """
         assert self.mean_all_responses is not None, "call compute_tuning() first"
 
         mu = self.mean_all_responses.mean(axis=1, keepdims=True)
@@ -956,8 +1026,17 @@ def _subsample(self, max_per_bin=None, seed=42):
         sd = np.where(sd == 0, 1.0, sd)  # avoid division by zero for flat cells
         responses_z = (self.mean_all_responses - mu) / sd
 
+        # z-score spontaneous data using the same mean/sd
+        if spontaneous is not None:
+            assert spontaneous.mean_all_responses is not None, \
+                "spontaneous SpeedTuning: call compute_tuning() first"
+            spont_z = (spontaneous.mean_all_responses - mu) / sd
+        else:
+            spont_z = None
+
         return self._plot_tuning_by_monotonicity(
-            responses_z, 'z-scored', axes, figsize, cells)
+            responses_z, 'z-scored', axes, figsize, cells,
+            spont_responses=spont_z)
 
 
 def plot_tuning_curves_grid(tunings: dict[str, SpeedTuning],
@@ -1184,6 +1263,7 @@ def plot_monotonicity_grid(tunings: dict[str, SpeedTuning],
         assert t.rho is not None, "call compute_spearman() first"
         assert t.significant_mask is not None, "call significance_test() first"
         assert t.monotonic_mask is not None, "call compute_spearman() first"
+        assert t.levene_p_values is not None, "call significance_test() first"
 
     J = len(labels)
     I = len(next(iter(tunings.values())).rho)
@@ -1266,8 +1346,21 @@ def plot_monotonicity_grid(tunings: dict[str, SpeedTuning],
                 else:
                     col = COLS['non-monotonic']
                 txt = f'{t.rho[ci]:.3f}'.replace('0.', '.', 1)
+                p = t.levene_p_values[ci]
+                stars = ''
+                if p <= 0.0001:
+                    stars = '***'
+                elif p <= 0.001:
+                    stars = '**'
+                elif p <= 0.01:
+                    stars = '*'
+                # elif p < 0.05:
+                #     stars = '*'
                 ax.text(j, i, txt, ha='center', va='center',
                         fontsize=8, color=col, fontweight='bold')
+                if stars:
+                    ax.text(j + 0.2, i, stars, ha='left', va='center',
+                            fontsize=9, color='black', fontweight='bold', alpha=0.7)
 
     ax.set(xticks=range(J), xticklabels=labels,
            yticks=range(I), yticklabels=order,
@@ -1289,6 +1382,11 @@ def plot_monotonicity_grid(tunings: dict[str, SpeedTuning],
         legend_handles.append(Patch(facecolor='none', hatch='///', linewidth=0,
                                     edgecolor='black'))
         legend_labels.append('speed-tuned')
+
+    # significance stars legend
+    blank = Line2D([], [], color='none', marker='none', linestyle='')
+    legend_handles.extend([blank, blank, blank])
+    legend_labels.extend(['p\u2264.01 *',  'p\u2264.001 **', 'p\u2264.0001 ***'])
 
     # insert section headers before specified entries
     if legend_headers:
