@@ -698,7 +698,10 @@ def tent_basis(x, centers):
     centers = np.asarray(centers, dtype=float).reshape(1, -1)  # (1, M)
     if centers.shape[1] == 1:
         return np.ones((x.shape[0], 1))
-    dscale = np.diff(centers.ravel()).mean()                   # uniform knot spacing
+    d = np.diff(centers.ravel())
+    if np.any(d <= 0):
+        raise ValueError("centers must be strictly increasing")
+    dscale = d.mean()                   # uniform knot spacing
     return np.maximum(1.0 - np.abs(x - centers) / dscale, 0.0)
 
 
