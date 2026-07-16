@@ -817,40 +817,60 @@ class EncodingModel:
             self._V = self._td.running_speed.mean(axis=1)
         return self._V
 
-    def _build_design(self, cell, model="full", fhat=None):
+    def _stimulus_onehot(self, labels=None):
+        """One-hot per-condition stimulus design, shape ``(n_trials, n_conditions)``.
+
+        The fitted (ridge-penalized) weights on these columns are the neuron's
+        tuning ``f(S) = A·s(t)`` (as in Liska/Yates); ridge shrinks the noisy
+        per-condition estimates. Shared across cells. For ``spontaneous`` (a
+        single condition) this is one column, collinear with the intercept —
+        harmless under ridge.
+        """
+        if labels is None:
+            labels = self._condition_labels()
+        return (labels[:, None] == np.unique(labels)[None, :]).astype(float)
+
+    def _build_design(self, cell, model="full", onehot=None, drive=None):
         """Assemble the design matrix for one cell and one nested model.
 
-        Columns are ``[f̂(S), drift(n_basis), (V), (V·f̂(S))]``, with the
-        running columns included per ``model``:
+        Columns are ``[f(S), drift(n_basis), (V), (V·d̂(S))]``, included per
+        ``model``:
 
-        - ``"null"`` : f̂(S), drift
-        - ``"add"``  : + V            (additive running term)
-        - ``"mult"`` : + V·f̂(S)      (multiplicative gain, linearized)
-        - ``"full"`` : + V + V·f̂(S)
+        - ``"null"`` : f(S), drift
+        - ``"add"``  : + V             (additive running term)
+        - ``"mult"`` : + V·d̂(S)       (running gated by the stimulus drive)
+        - ``"full"`` : + V + V·d̂(S)
 
-        No separate intercept column: the partition-of-unity tent basis
-        already spans the constant, so ``β₀(t) = Σⱼ bⱼ φⱼ(t)`` is the
-        (time-varying) baseline; a constant column would be collinear with it.
+        The stimulus tuning ``f(S)`` is the **fitted, ridge-penalized one-hot**
+        design (:meth:`_stimulus_onehot`) — ridge shrinks the noisy per-condition
+        estimates. The multiplicative term gates running by the per-condition
+        drive ``d̂(S)`` (the per-fold mean, i.e. the OLS one-hot drive). No
+        explicit intercept column: the (unpenalized) ``RidgeCV`` intercept in
+        :meth:`fit_all` is the baseline, and the tent basis models drift.
 
         Parameters
         ----------
-        fhat : np.ndarray, optional
-            A ``(n_cells, n_trials)`` stimulus-mean array to use instead of the
-            cached all-trial :meth:`_stimulus_mean`. Pass the training-fold
-            f̂(S) during cross-validation (:meth:`fit_all`) so the R² stays
-            leakage-free.
+        onehot : np.ndarray, optional
+            ``(n_trials, n_conditions)`` tuning design; defaults to
+            :meth:`_stimulus_onehot`. (Shared across cells — the Null/Add designs
+            do not depend on ``cell``.)
+        drive : np.ndarray, optional
+            ``(n_cells, n_trials)`` per-condition drive for the interaction; pass
+            the training-fold mean during CV so it stays leakage-free (defaults
+            to the cached all-trial :meth:`_stimulus_mean`).
 
         Returns ``(n_trials, n_features)``.
         """
         assert model in ("null", "add", "mult", "full"), f"unknown model: {model}"
-        fhat_cell = (self._stimulus_mean() if fhat is None else fhat)[cell]
+        S = self._stimulus_onehot() if onehot is None else onehot
         drift = self._drift_basis()                        # (n_trials, n_basis)
         V = self._running_speed()                          # (n_trials,)
-        cols = [fhat_cell[:, None], drift]
+        cols = [S, drift]
         if model in ("add", "full"):
             cols.append(V[:, None])
         if model in ("mult", "full"):
-            cols.append((V * fhat_cell)[:, None])
+            d = (self._stimulus_mean() if drive is None else drive)[cell]
+            cols.append((V * d)[:, None])
         return np.column_stack(cols)
 
     def _fold_stimulus_mean(self, R, labels, train_idx):
@@ -883,15 +903,51 @@ class EncodingModel:
         ss_tot = ((y - y.mean(axis=1, keepdims=True)) ** 2).sum(axis=1)
         return 1.0 - ss_res / ss_tot
 
+    @staticmethod
+    def _ridge_cv_predict(X_tr, Y_tr, X_te, alphas):
+        """Ridge with a **per-target** GCV-selected λ and an unpenalized intercept.
+
+        Features are z-scored on ``X_tr``; the intercept (target mean) is not
+        penalised. ``Y_tr`` may be 1-D ``(n,)`` or 2-D ``(n, m)``; a 2-D array
+        shares the design (one SVD) but each column (cell) selects its **own** λ,
+        so the multi-target Null/Add fits match a per-cell fit exactly — the
+        nested ΔR² comparison stays consistent across models. Returns test
+        predictions of matching shape via a closed-form SVD solve (far faster
+        than a per-cell ``RidgeCV`` loop for this many small fits).
+        """
+        mu = X_tr.mean(0); sd = X_tr.std(0); sd = np.where(sd == 0, 1.0, sd)
+        Xz = (X_tr - mu) / sd
+        one_d = Y_tr.ndim == 1
+        Y = Y_tr[:, None] if one_d else Y_tr
+        ybar = Y.mean(0)
+        Yc = Y - ybar
+        U, s, Vt = np.linalg.svd(Xz, full_matrices=False)
+        UtY = U.T @ Yc                                          # (r, m)
+        n, m = Xz.shape[0], Y.shape[1]; s2 = s ** 2
+        best_gcv = np.full(m, np.inf); best_a = np.full(m, alphas[0], dtype=float)
+        for a in alphas:                                        # per-target GCV
+            f = s2 / (s2 + a)
+            rss = ((Yc - U @ (f[:, None] * UtY)) ** 2).sum(0)   # (m,)
+            gcv = rss / (n * (1 - f.sum() / n) ** 2)
+            better = gcv < best_gcv
+            best_gcv[better] = gcv[better]; best_a[better] = a
+        fj = s[:, None] / (s2[:, None] + best_a[None, :])       # (r, m)
+        B = Vt.T @ (fj * UtY)                                   # (p, m)
+        pred = ((X_te - mu) / sd) @ B + ybar                   # (n_te, m)
+        return pred[:, 0] if one_d else pred
+
     def fit_all(self, n_folds=5, alphas=None, random_state=0):
         """Fit all four nested models per neuron with cross-validated R².
 
         Each neuron is fit by ridge regression (standardized features, λ chosen
-        by :class:`sklearn.linear_model.RidgeCV`) under ``n_folds``-fold
-        cross-validation. The stimulus mean f̂(S) is recomputed from the
-        *training* trials of every fold (:meth:`_fold_stimulus_mean`), so the
-        stored R² is a genuine out-of-fold prediction score that the Null model
-        cannot inflate by memorising per-condition means.
+        by :class:`sklearn.linear_model.RidgeCV`, unpenalized intercept) under
+        ``n_folds``-fold cross-validation. The stimulus tuning ``f(S)`` is a
+        **fitted, ridge-penalized one-hot** design (:meth:`_stimulus_onehot`);
+        ridge shrinks the noisy per-condition estimates. The multiplicative term
+        gates running by the per-condition drive, recomputed from *training*
+        trials each fold (:meth:`_fold_stimulus_mean`) so the R² is leakage-free.
+        The stimulus-only Null/Add designs are shared across cells and fit as a
+        single multi-target ridge.
 
         Parameters
         ----------
@@ -909,13 +965,11 @@ class EncodingModel:
 
         Notes
         -----
-        For ``spontaneous`` there is a single stimulus condition, so f̂(S) is
-        constant and the multiplicative term ``V·f̂(S) ∝ V``; ``r2_mult`` then
-        coincides with ``r2_add`` (ridge tolerates the collinearity).
+        For ``spontaneous`` there is a single stimulus condition, so the one-hot
+        tuning is a single (constant) column and the drive is constant; the
+        multiplicative term ``V·d̂ ∝ V``, so ``r2_mult`` coincides with
+        ``r2_add`` (ridge tolerates the collinearity).
         """
-        from sklearn.linear_model import RidgeCV
-        from sklearn.preprocessing import StandardScaler
-        from sklearn.pipeline import Pipeline
         from sklearn.model_selection import KFold
 
         if alphas is None:
@@ -923,22 +977,25 @@ class EncodingModel:
 
         R = self._trial_response()                 # (n_cells, n_trials) targets
         labels = self._condition_labels()          # (n_trials,)
+        S = self._stimulus_onehot(labels)          # (n_trials, n_conditions) tuning design
         n_cells, n_trials = R.shape
         models = ("null", "add", "mult", "full")
         yhat = {m: np.empty_like(R) for m in models}
 
         kf = KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
         for train_idx, test_idx in kf.split(np.arange(n_trials)):
-            fhat = self._fold_stimulus_mean(R, labels, train_idx)   # train-only f̂(S)
+            drive = self._fold_stimulus_mean(R, labels, train_idx)   # per-fold drive (leak-free)
             for model in models:
-                for cell in range(n_cells):
-                    X = self._build_design(cell, model, fhat=fhat)
-                    pipe = Pipeline([
-                        ("scale", StandardScaler()),
-                        ("ridge", RidgeCV(alphas=alphas)),
-                    ])
-                    pipe.fit(X[train_idx], R[cell, train_idx])
-                    yhat[model][cell, test_idx] = pipe.predict(X[test_idx])
+                if model in ("null", "add"):
+                    # stimulus-only design is identical across cells: one shared solve
+                    X = self._build_design(0, model, onehot=S, drive=drive)
+                    yhat[model][:, test_idx] = self._ridge_cv_predict(
+                        X[train_idx], R[:, train_idx].T, X[test_idx], alphas).T
+                else:
+                    for cell in range(n_cells):
+                        X = self._build_design(cell, model, onehot=S, drive=drive)
+                        yhat[model][cell, test_idx] = self._ridge_cv_predict(
+                            X[train_idx], R[cell, train_idx], X[test_idx], alphas)
 
         for model in models:
             setattr(self, f"r2_{model}", self._pooled_r2(R, yhat[model]))

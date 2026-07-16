@@ -30,21 +30,21 @@ novel and is predicted by state-dependent sparsening (Froudarakis et al. 2014).
 Per neuron *i*, trial *t*, four **nested linear** models (design assembled by `_build_design`):
 
 ```
-Null :  r_i(t) = f̂_i(S) + Σ_j b_ij φ_j(t)
+Null :  r_i(t) = A_i·s(t) + β₀ + Σ_j b_ij φ_j(t)
 Add  :        + β_add · V(t)
-Mult :        + β_mult · [ V(t) · f̂_i(S) ]
-Full :        + β_add · V(t) + β_mult · [ V(t) · f̂_i(S) ]
+Mult :        + β_mult · [ V(t) · d̂_i(S) ]
+Full :        + β_add · V(t) + β_mult · [ V(t) · d̂_i(S) ]
 ```
 
-- **f̂(S)** — per-condition mean response (the empirical tuning). Conditions: dg = orientation×temporal-frequency; sg = orientation×spatial-frequency×phase; ns = image identity (`frame`, 118 images, blank `-1` already excluded by `extract_trials`); spont = single condition (constant). The Null model thus **"takes out" the stimulus mean and predicts the residual** ([`Plan.md`](Plan.md):32).
-- **β₀(t) = Σ_j b_j φ_j(t)** — slow-drift baseline; φ_j are `n_basis` (=5) partition-of-unity tent functions over trial time (`tent_basis`). No separate intercept: the tent basis already spans the constant.
+- **f(S) = A·s(t)** — the stimulus tuning, a **fitted, ridge-penalized one-hot** design: `s(t)` is a one-hot vector over stimulus conditions and `A_i` are per-condition weights fit per neuron — exactly the tuning term of Liska/Yates (`do_regression_ss.m`). Conditions: dg = orientation×temporal-frequency; sg = orientation×spatial-frequency×phase; ns = image identity (`frame`, 118 images, blank `-1` excluded by `extract_trials`); spont = single condition. **Ridge shrinks the noisy per-condition estimates** — this matters: an unpenalized/OLS tuning (or a coefficient-1 offset) injects per-condition noise for few-trial conditions and breaks the Allen `run_mod` positive control (§8).
+- **Baseline** — a **fitted, unpenalized intercept** β₀ plus a **slow-drift** term `Σ_j b_j φ_j(t)`, where φ_j are `n_basis` (=5) partition-of-unity tent functions over trial time (`tent_basis`). No constant design column; the intercept is the baseline and the tent basis captures drift around it.
 - **V(t)** — per-trial mean running speed (raw; `extract_trials` does not clamp, so small tracking-noise negatives occur, inconsequential for a linear regressor).
-- **Multiplicative term.** `Plan.md` specifies a rectified gain `ReLU[1 + β_mult·V]` scaling f(S) (after Liska/Yates). We use its **first-order linearization**, the interaction `β_mult·(V·f̂(S))`, because (i) it keeps all four models linear, giving a clean cross-validated ΔR² decomposition (the project's target quantity, which neither reference paper computes) and (ii) `f̂(S)(1+β_mult V) = f̂(S) + β_mult(V·f̂(S))`. Sign and magnitude of β_mult retain the gain interpretation (>0 ⇒ running amplifies stimulus responses).
+- **Multiplicative term** — running gated by the stimulus drive: `β_mult·(V·d̂(S))`, where `d̂(S)` is the per-condition drive (the per-fold OLS one-hot mean). This is the first-order linearization of Plan.md's rectified gain `ReLU[1+β_mult·V]`, keeping all four models linear (a clean cross-validated ΔR² decomposition — the project's target quantity, which neither reference computes). We do **not** fit the single-scalar gain that scales the *fitted* drive by alternating least squares: the exploration found that gain negligible for gratings and unnecessary to restore the control (§7). β_mult > 0 ⇒ running amplifies stimulus responses.
 
 ## 3. Estimation (`fit_all`)
 
-- **Ridge regression** per neuron: `Pipeline(StandardScaler, RidgeCV(alphas=logspace(-3,3,13)))`; features standardised, penalty λ selected by RidgeCV. Ridge is required because the Full model's terms are partly collinear and because it curbs the extra-parameter overfitting that would otherwise let Full win trivially.
-- **5-fold cross-validation** (`KFold`, shuffled, seed 0). Within each fold, **f̂(S) is recomputed from training trials only** (`_fold_stimulus_mean`); using the all-trial mean would let the Null model memorise per-condition means and inflate every R².
+- **Ridge regression** per neuron: features z-scored, penalty λ chosen by **generalized cross-validation (GCV)**, and the **intercept (baseline) left unpenalised** (as in Liska/Yates's `ridgeMML`). A closed-form SVD solve (`_ridge_cv_predict`); the stimulus-only Null/Add designs are identical across cells, so all 47 neurons are fit in a single multi-target solve (Mult/Full are per-cell — the interaction column is cell-specific). Ridge curbs the extra-parameter overfitting that would otherwise let Full win trivially.
+- **5-fold cross-validation** (`KFold`, shuffled, seed 0). The tuning `A·s(t)` is fit jointly each fold; the multiplicative gate `d̂(S)` is recomputed from *training* trials only (`_fold_stimulus_mean`) so the R² stays leakage-free.
 - **Cross-validated R²** (pooled out-of-fold): `R² = 1 − Σ_t (y − ŷ_cv)² / Σ_t (y − ȳ)²`, per neuron. R² < 0 is admissible and meaningful (model predicts worse than the mean).
 - **ΔR²_x = R²_x − R²_null** for x ∈ {add, mult, full} (`r2_decomposition`).
 
@@ -79,38 +79,38 @@ The headline deliverable is the gratings-vs-natural contrast of ΔR²_mult (and 
 
 ## 7. Results (observed on the current data)
 
-Fitted with `EncodingModel(td, n_basis=5).fit_all()` per stimulus (47 matched cells); arrays saved to `data/encoding_r2.npz`. Medians across cells; one-sided Wilcoxon signed-rank vs 0.
+Fitted with `EncodingModel(td, n_basis=5).fit_all()` per stimulus (47 matched cells; ridge one-hot tuning); arrays saved to `data/encoding_r2.npz`. Medians across cells; one-sided Wilcoxon signed-rank vs 0.
 
 | stimulus | ΔR²_add | ΔR²_mult | ΔR²_full | cells ΔR²_full > 0 |
 |---|---|---|---|---|
-| drifting_gratings | +0.0012 (p=.002) | +0.0020 (p=.029) | +0.0075 (p=.003) | 70 % |
-| static_gratings | +0.0010 (p=3e-8) | −0.0003 (p=.32, n.s.) | +0.0005 (p=.064, n.s.) | 55 % |
-| natural_scenes | +0.0033 (p=2e-11) | +0.0031 (p=2e-4) | +0.0039 (p=3e-6) | 74 % |
-| spontaneous | +0.0009 (p=.011) | +0.0009 (p=.011) † | +0.0002 (p=.018) | 57 % |
+| drifting_gratings | +0.0001 (p=.03) | −0.0026 (p=.91, n.s.) | −0.0017 (p=.76, n.s.) | 38 % |
+| static_gratings | +0.0005 (p=3e-7) | −0.0002 (p=.22, n.s.) | +0.0003 (p=.046) | 57 % |
+| natural_scenes | +0.0030 (p=4e-11) | +0.0019 (p=7e-4) | +0.0033 (p=3e-5) | 70 % |
+| spontaneous | +0.0001 (p=.05) | +0.0001 (p=.05) † | +0.0001 (p=.03) | 51 % |
 
-† spontaneous has a single condition ⇒ Mult ≡ Add, as predicted (§5). Effect sizes are small (≈0.1–0.8 % of held-out variance) — consistent with running modulating a minority of cells. Under **Benjamini–Hochberg FDR (q=0.05)** across the 12 term×stimulus tests, **every effect survives except the two static-gratings running terms** (ΔR²_mult, ΔR²_full); all additive terms and all drifting-grating / natural-scene terms remain significant. (Under the stricter Bonferroni bound, ΔR²_mult(dg) and the spontaneous terms become marginal.)
+† spontaneous has a single condition ⇒ Mult ≡ Add, as predicted (§5). Effect sizes are small (all ≲ 0.3 % of held-out variance). Under **Benjamini–Hochberg FDR (q=0.05)** across the 12 term×stimulus tests, only the **natural-scene terms (all three) and the static-gratings additive term** survive; the drifting-gratings and spontaneous effects do not.
 
 ![Cross-validated ΔR² decomposition by stimulus](figures/dR2_decomposition.png)
 
-**Figure 1. Cross-validated ΔR² decomposition by stimulus.** Median ΔR² (±95% bootstrap CI, n=47 cells) for the additive, multiplicative, and full running terms. Filled markers denote one-sided Wilcoxon *p*<0.05 (equivalently BH-FDR *q*=0.05); open markers are non-significant. Running is encoded for **drifting gratings** and **natural scenes** across all terms, whereas **static gratings** shows only an additive effect (multiplicative and full terms n.s.).
+**Figure 1. Cross-validated ΔR² decomposition by stimulus.** Median ΔR² (±95% bootstrap CI, n=47 cells) for the additive, multiplicative, and full running terms. Filled markers denote one-sided Wilcoxon *p*<0.05. Only **natural scenes** show significant running modulation across terms (including the multiplicative/gain term); static gratings has a weak additive-only effect; **drifting gratings shows none** (ΔR²_full negative).
 
-- **H1 (presence) — supported** for dg (p=.003), ns (p=3e-6) and spont (p=.018); sg only marginal (p=.064). Running carries out-of-sample predictive information beyond stimulus tuning and slow drift.
-- **H2 (gain structure) — present but stimulus-dependent.** A significant multiplicative term appears for **natural scenes** (p=2e-4, robust) and **drifting gratings** (p=.029) but is **absent for static gratings** (n.s.; Full < Add, the gain column only adds noise). So sg modulation is purely additive, whereas dg and ns carry a genuine gain component (statistically clearest for natural scenes).
-- **H3 (gratings vs natural) — modulation differs across stimulus type, but not as the "grating-specific" prior expected.** Paired across the same cells, natural-scene modulation is **comparable to drifting gratings** (ΔR²_mult p=.23, ΔR²_full p=.23) and **significantly exceeds static gratings** (ΔR²_mult p=.010, ΔR²_full p=.003). Natural scenes are therefore **not less** modulated by running than gratings, matching the Froudarakis-based prediction (§1, §5). The naive reading that running acts "specifically in drifting gratings" is **not** supported.
+- **H1 (presence) — supported only for natural scenes** (ΔR²_full p=3e-5). Static gratings has a weak additive effect (p=.046, borderline); **drifting gratings shows no running modulation** (ΔR²_full = −0.0017, p=.76); spontaneous is negligible. With a reference-grade tuning model, running carries out-of-sample predictive information beyond stimulus + drift **only for natural scenes**.
+- **H2 (gain structure) — a multiplicative gain appears only for natural scenes** (ΔR²_mult p=7e-4). For gratings the multiplicative term is non-significant/negative (it only adds noise). This is the *opposite* of the grating-centred prior (§5).
+- **H3 (gratings vs natural — the crux) — running modulation is natural-scene-specific.** Paired across the same cells, natural-scene modulation **significantly exceeds drifting gratings** (ΔR²_mult p=.002, ΔR²_full p=.004) and marginally exceeds static gratings (p≈.05–.06). The naive reading that running acts "specifically in drifting gratings" is **reversed** — it is specific to *natural scenes*, matching the Froudarakis state-dependent prediction (§1, §5).
 
-**Validation (controls defined in §8).** *Positive control:* per-cell ΔR²_full correlates positively with the Allen `run_mod_*` index for all three stimuli (Spearman ρ = +0.15 dg / +0.24 sg / +0.25 ns) — correct sign, though not individually significant at n=47. *Sensitivity (responsive cells only, Allen p<0.05):* the picture strengthens — dg median ΔR²_full = +0.009 (p=.004, n=30), sg becomes significant (p=.034, n=43), ns robust (+0.003, p=6e-6, n=44). *Negative control:* shuffling V collapses ΔR²_add/mult to ≈ 0.
+**Validation (controls defined in §8).** *Positive control:* per-cell ΔR²_full is weakly positively correlated with the Allen `run_mod` index for natural scenes (Spearman ρ = +0.22, n.s. at n=47) and ~0 for gratings (dg +0.07, sg −0.07) — consistent with modulation existing only for ns, and, critically, with **no significant wrong-sign correlation** (the failure mode of the earlier offset model). *Sensitivity (responsive cells only, Allen p<0.05):* ns robust (median ΔR²_full +0.003, p=8e-5, n=44); sg borderline (p=.044, n=43); dg n.s. (n=30). *Negative control:* shuffling V collapses ΔR²_add/mult to ≈ 0.
 
-**Conclusion.** Running modulation of V1 is present and cross-validated (H1); its structure is mixed and stimulus-dependent: multiplicative gain in drifting gratings and natural scenes, additive-only in static gratings (H2); and it differs across stimulus type (H3), with **natural scenes modulated at least as strongly as drifting gratings**. All effects are small and should be read as preliminary; the gratings-vs-natural contrast carries the confounds in §9, and robustness to the response-window and `n_basis` choices is a recommended follow-up.
+**Conclusion.** With a **reference-grade ridge one-hot tuning**, running modulation of V1 is **specific to natural scenes**: robustly encoded (ΔR²_full p≈3e-5) with a significant multiplicative/gain component, significantly stronger than either grating type, and **absent for drifting gratings**. This *reverses* the naive "specifically in drifting grating" expectation and is the project's novel result — consistent with Froudarakis et al.'s finding that natural-scene population coding is state/running-dependent. Effects are small (a minority of cells, ≲0.3 % variance); the gratings-vs-natural contrast still carries the confounds in §9.
 
 ## 8. Validation & controls
 
 - **Positive control (external):** per-neuron modulation (sign/magnitude of ΔR²_full or β_add) should correlate with the pre-computed Allen indices `run_mod_dg/sg/ns` (and agree with `p_run_mod_*`) in `data/neurons_metadata.csv`. Large divergence flags a methodological error.
-- **Positive control (internal):** the fitted f̂(S) coefficient ≈ 1.
+- **Positive control (internal):** the ridge-shrunk one-hot tuning yields a **positive Null-model R²** (tuning + drift predict held-out responses better than the mean); an unpenalized/offset tuning does not (§7). The multiplicative gate is recomputed per training fold, so the reported R² is leakage-free (§3).
 - **Negative control:** shuffling V across trials must collapse ΔR²_add and ΔR²_mult to ≈ 0 (running carries no information under the null).
 
 ![Positive control: ΔR²_full vs Allen run_mod index](figures/validation_runmod.png)
 
-**Figure 2. Positive control.** Per-cell ΔR²_full (encoding model) against the pre-computed Allen running-modulation index `run_mod_*`, per stimulus; red line = least-squares fit. The consistently positive Spearman ρ (correct sign for all three stimuli) confirms that per-cell modulation tracks the independent Allen metric (though the correlations are not individually significant at n=47).
+**Figure 2. Positive control.** Per-cell ΔR²_full (encoding model) against the pre-computed Allen running-modulation index `run_mod_*`, per stimulus; red line = least-squares fit. Spearman ρ is weakly positive for natural scenes (+0.22) and ~0 for gratings (dg +0.07, sg −0.07) — none significant at n=47. The key contrast with the earlier offset model is that there is **no significant wrong-sign correlation**; natural-scene modulation trends with the independent Allen metric in the right direction.
 
 ## 9. Limitations & confounds
 

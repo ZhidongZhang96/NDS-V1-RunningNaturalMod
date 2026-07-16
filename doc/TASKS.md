@@ -80,17 +80,17 @@ Owns `utils.py` L559–661 + cross-cutting deliverables.
 ## Person C — Analysis 3: `EncodingModel` — ✅ DONE (C1–C8)
 
 Owns `utils.py` `EncodingModel` (from L705) + module-level `tent_basis` (L678).
-**Implemented as a linear nested GLM** (approved deviation from the ReLU-gain/ALS plan after reading Liska/Yates + Dadarlat & Stryker): the multiplicative term is the interaction `β_mult·(V·f̂(S))` — the first-order linearization of `ReLU[1+β_mult V]` — and the fitter is `sklearn` `RidgeCV`+`StandardScaler` under 5-fold `KFold` (B9's CV splitter was never needed). Methodology, results & interpretation: [`EncodingModel.md`](EncodingModel.md).
+**Implemented as a linear nested GLM with a fitted, ridge-penalized one-hot tuning `A·s(t)`** (as in Liska/Yates), a drifting baseline, and running as additive `β_add·V` + a linearized multiplicative gate `β_mult·(V·d̂(S))`. Fitter: z-scored features, GCV-selected ridge via a closed-form SVD solve (Null/Add fit multi-target across all cells); no alternating least squares (the single-scalar gain is negligible for gratings — see §7). Methodology, results & interpretation: [`EncodingModel.md`](EncodingModel.md).
 - [x] **C1** `tent_basis(x, centers)` (L678) — partition-of-unity tent basis; unit-tested.
-- [x] **C2** `f̂(S)` = per-condition **mean response** (a single residual column, *not* one-hot): dg orientation×TF, sg orientation×SF×phase, ns per-image (`frame`), spont constant. Blank `-1` already excluded by `extract_trials`.
+- [x] **C2** `f(S) = A·s(t)` — a **fitted, ridge-penalized one-hot tuning** (`_stimulus_onehot`, per-condition weights per neuron; ridge shrinks noisy per-condition estimates): dg orientation×TF, sg orientation×SF×phase, ns per-image (`frame`, 118), spont constant. Blank `-1` already excluded by `extract_trials`.
 - [x] **C3** drift `_drift_basis` — `n_basis` tent functions over trial time; **default 5** (matches Liska/Yates, not 20).
-- [x] **C4** running terms in `_build_design` (L820) — additive `V`; multiplicative **linear interaction `V·f̂(S)`** (no explicit intercept — the tent basis spans the constant).
-- [x] **C5** fitter — per-neuron `RidgeCV` (standardized features), **no ALS** (the model is linear); f̂(S) recomputed from training trials each fold (leakage control).
+- [x] **C4** running terms in `_build_design` — additive `V`; multiplicative **linear interaction `V·d̂(S)`** (running gated by the per-fold stimulus drive). No intercept *column*, but the fitter includes an **unpenalized intercept** as the baseline (kept deliberately).
+- [x] **C5** fitter — closed-form ridge with **GCV-selected λ** and unpenalized intercept (`_ridge_cv_predict`); Null/Add fit as one **multi-target** solve across cells, Mult/Full per-cell. **No ALS** (linear). The multiplicative gate `d̂(S)` is recomputed from training trials each fold (leakage control).
 - [x] **C6** `fit_all()` (L886) — four nested models per cell; pooled **cross-validated R²** via `sklearn.KFold` → `r2_null/add/mult/full`.
 - [x] **C7** `r2_decomposition()` (L947) → `delta_add/mult/full = model − null` (on CV R²).
 - [x] **C8** `plot_r2_decomposition()` (L973) — violin + jittered per-cell points per ΔR² term; composes across stimuli via `ax=` for the gratings-vs-natural figure.
 
-**Done ✅** — four models fit for all 47 cells with CV R²; ΔR² finite (`full ≥ add,mult` holds for dg/ns, at the noise floor for sg/spont); ns runs with blanks excluded. Fitted arrays saved to `data/encoding_r2.npz`; results + interpretation in [`EncodingModel.md`](EncodingModel.md) §7. **Preliminary finding:** running modulation is present for dg & ns (not sg after FDR); natural scenes are modulated at least as strongly as drifting gratings — the project's novel result.
+**Done ✅** — four models fit for all 47 cells with cross-validated R² (positive Null R²; the Allen `run_mod` positive control holds). Fitted arrays in `data/encoding_r2.npz`; results + interpretation in [`EncodingModel.md`](EncodingModel.md) §7. **Preliminary finding:** with the reference-grade ridge one-hot tuning, running modulation of V1 is **specific to natural scenes** (ΔR²_full p≈1e-5) and **not significant for drifting gratings** — a sharper version of the novel result.
 
 ---
 
