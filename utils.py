@@ -698,7 +698,10 @@ def tent_basis(x, centers):
     centers = np.asarray(centers, dtype=float).reshape(1, -1)  # (1, M)
     if centers.shape[1] == 1:
         return np.ones((x.shape[0], 1))
-    dscale = np.diff(centers.ravel()).mean()                   # uniform knot spacing
+    d = np.diff(centers.ravel())
+    if np.any(d <= 0):
+        raise ValueError("centers must be strictly increasing")
+    dscale = d.mean()                   # uniform knot spacing
     return np.maximum(1.0 - np.abs(x - centers) / dscale, 0.0)
 
 
@@ -901,7 +904,9 @@ class EncodingModel:
         """
         ss_res = ((y - yhat) ** 2).sum(axis=1)
         ss_tot = ((y - y.mean(axis=1, keepdims=True)) ** 2).sum(axis=1)
-        return 1.0 - ss_res / ss_tot
+        with np.errstate(divide="ignore", invalid="ignore"):
+            r2 = 1.0 - ss_res / ss_tot
+        return np.where(ss_tot == 0, 0.0, r2)
 
     @staticmethod
     def _ridge_cv_predict(X_tr, Y_tr, X_te, alphas):
