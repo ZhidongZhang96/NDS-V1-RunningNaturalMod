@@ -607,36 +607,45 @@ class SpeedTuning:
         if bins_ids is None:
             bins_ids = np.digitize(self.speeds, bins_edges) if self.bins_ids is None else self.bins_ids
 
-        # compute the mean and std of responses
+        # compute the mean response per bin (handle empty bins)
         mean_all_responses = []
-        for b in range(1, self.n_bins+1):
-            res_bin = self.responses[:, bins_ids==b]   # (n_cells, n_trial in the bin)
+        for b in range(1, self.n_bins + 1):
+            mask = bins_ids == b
+            if not np.any(mask):
+                mean_all_responses.append(np.full(self.responses.shape[0], np.nan))
+                continue
+            res_bin = self.responses[:, mask]   # (n_cells, n_trials_in_bin)
             mean_all_responses.append(res_bin.mean(axis=1))
-        mean_all_responses = np.array(mean_all_responses).T # (n_cells, n_bins)
+        mean_all_responses = np.array(mean_all_responses).T  # (n_cells, n_bins)
 
         return bins_edges, bins_ids, mean_all_responses
 
-    def _subsample(self, max_per_bin=None, seed=42):
-        """Subsample the low-speed bins, to overcome distribution unbalance for further statistical test"""
-        assert self.bins_ids is not None
-        bins_ids = self.bins_ids.copy()    # (n_trials_total,)
+def _subsample(self, max_per_bin=None, seed=42):
+    """Subsample high-count bins to reduce speed-distribution imbalance.
 
-        ids, bin_counts = np.unique(bins_ids, return_counts=True)
-        order = bin_counts.argsort()[::-1]   # descending sorting
-        if max_per_bin is None:
-            max_per_bin = bin_counts[order[1]]   # the 2nd largest num
+    Marks dropped trials by setting their bin id to -1 in ``self.bins_sub_ids``.
+    """
+    assert self.bins_ids is not None
+    bins_ids = self.bins_ids.copy()  # (n_trials_total,)
 
-        for id in ids[order]:
-            if bin_counts[id-1] > max_per_bin: 
-                trials = np.where(bins_ids==id)[0]
-                # subsample
-                rng = np.random.default_rng(seed) 
-                selected = rng.choice(trials, size=max_per_bin, replace=False)
-                # set the non-selected trials' bin_ids to be `-1`
-                unselected = np.setdiff1d(trials, selected)
-                bins_ids[unselected] = -1
+    ids, counts = np.unique(bins_ids, return_counts=True)
+    if max_per_bin is None:
+        # If there's only one occupied bin, subsampling is undefined; keep all trials.
+        if len(counts) < 2:
+            self.bins_sub_ids = bins_ids
+            return
+        max_per_bin = np.partition(counts, -2)[-2]  # 2nd-largest occupied-bin count
 
-        self.bins_sub_ids = bins_ids
+    rng = np.random.default_rng(seed)
+    count_map = dict(zip(ids, counts))
+    for bid in ids:
+        if count_map[bid] > max_per_bin:
+            trials = np.where(bins_ids == bid)[0]
+            selected = rng.choice(trials, size=max_per_bin, replace=False)
+            unselected = np.setdiff1d(trials, selected)
+            bins_ids[unselected] = -1
+
+    self.bins_sub_ids = bins_ids
 
 
     # ------------- core computation -------------
@@ -659,9 +668,9 @@ class SpeedTuning:
         self.bins_edges, self.bins_ids, self.mean_all_responses = \
             self._binned_responses()
 
-        # compute the mean and std across cells
-        self.mean_responses = self.mean_all_responses.mean(axis=0)
-        self.std_responses = self.mean_all_responses.std(axis=0)
+        # compute the mean and std across cells (ignore empty bins)
+        self.mean_responses = np.nanmean(self.mean_all_responses, axis=0)
+        self.std_responses = np.nanstd(self.mean_all_responses, axis=0)
 
         # subsample, for significant test
         self.bins_sub_ids = self.bins_ids
@@ -1012,8 +1021,7 @@ def plot_tuning_curves_grid(tunings: dict[str, SpeedTuning],
 
     # hide unused subplots
     for i in range(len(labels), 4):
-        axes[i].set_visible(False)
-
+        axes.flat[i].set_visible(False)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     return fig
 
