@@ -8,7 +8,10 @@ from scipy.stats import spearmanr, wilcoxon
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
+N_CELLS = 47
 STIMULI = ['drifting_gratings', 'static_gratings', 'natural_scenes', 'spontaneous']
+SHORT_STIM = ['dg', 'sg', 'ns', 'spont']
+
 def check_stim(stimulus:str):
     assert stimulus in STIMULI, f"You must choose one of the stimulus type: {STIMULI}"
 
@@ -686,7 +689,7 @@ class BinaryModulation:
         """
         self._validate_state()
         response_mean = self._response_mean
-        n_cells = response_mean.shape[0]
+        n_cells = N_CELLS
 
         if self.run_mask.sum() == 0 or self.still_mask.sum() == 0:
             self.mi = np.full(n_cells, np.nan)
@@ -707,7 +710,74 @@ class BinaryModulation:
             self.r_run[valid] - self.r_still[valid]
         ) / denom[valid]
 
-        return self.mi
+    def compute_running_ttest(self, threshold=0.05, min_conditions: int = 3):
+        """Paired t-test per cell on condition-level (R_run, R_still) pairs.
+
+        For each cell, the per-condition mean responses under running and
+        still (computed by :meth:`fit_gain_model`) are paired by stimulus
+        condition. A one-sample t-test on the diffs ``d_c = R_run_c -
+        R_still_c`` tests H0: mean(d) = 0 against H1: mean(d) ≠ 0.
+
+        This design controls for stimulus-condition identity: if running
+        and still trials happen to cover different sets of orientations or
+        spatial frequencies, the pairing cancels that out, whereas a pooled
+        trial-level t-test would confound stimulus tuning with speed tuning.
+
+        Requires :meth:`fit_gain_model` to have been called first (the
+        condition-level pairs are extracted there). Cells whose
+        ``condition_run`` / ``condition_still`` are ``None`` (e.g. spontaneous
+        activity) are left as NaN.
+
+        Parameters
+        ----------
+        threshold : float, optional
+            p-value threshold for ``tuned_mask``, by default 0.05.
+        min_conditions : int, optional
+            Minimum number of valid condition pairs required to run the
+            test, by default 3.
+
+        Stores
+        ------
+        t_stat : np.ndarray, shape ``(n_cells,)``
+            t-statistic (positive = running > still).
+        t_pval : np.ndarray, shape ``(n_cells,)``
+            Two-sided p-value for the paired test.
+        tuned_mask : np.ndarray of bool, shape ``(n_cells,)``
+            Cells with ``t_pval < threshold`` and enough conditions.
+        """
+        from scipy.stats import ttest_1samp
+
+        self._validate_state()
+        n_cells = N_CELLS
+
+        # condition-level pairs must be populated (fit_gain_model prerequisite)
+        if self.condition_still is None or self.condition_run is None:
+            raise ValueError(
+                "fit_gain_model() must be called before compute_running_ttest()"
+            )
+
+        t_stat = np.full(n_cells, np.nan)
+        t_pval = np.full(n_cells, np.nan)
+
+        for cell_index in range(n_cells):
+            still_c = self.condition_still[cell_index]
+            run_c = self.condition_run[cell_index]
+
+            if still_c is None or run_c is None or len(still_c) < min_conditions:
+                continue
+
+            diffs = np.asarray(run_c, dtype=float) - np.asarray(still_c, dtype=float)
+            diffs = diffs[np.isfinite(diffs)]
+
+            if len(diffs) < min_conditions:
+                continue
+            stat, pval = ttest_1samp(diffs, 0.0)
+            t_stat[cell_index] = stat
+            t_pval[cell_index] = pval
+
+        self.tuned_mask = t_pval < threshold
+        self.t_stat = t_stat
+        self.t_pval = t_pval
 
     def get_condition_labels(self):
         """Build one visual-stimulus condition label for each trial.
@@ -761,7 +831,7 @@ class BinaryModulation:
         """
         self._validate_state()
         response_mean = self._response_mean
-        n_cells = response_mean.shape[0]
+        n_cells = N_CELLS
         labels = self.get_condition_labels()
 
         self.gain_a = np.full(n_cells, np.nan)
@@ -818,11 +888,16 @@ class BinaryModulation:
 
             self.gain_a[cell_index] = slope
             self.gain_b[cell_index] = intercept
+    
+    # ------------- plotting & print -------------
+    
+    def print_tuned_cells(self):
+        assert self.tuned_mask is not None, "call compute_running_ttest() first"
+        assert self.t_pval is not None, "call compute_running_ttest() first"
+        print(f"Significantly tuned neurons: #{self.tuned_mask.sum()} \n {np.where(self.tuned_mask)[0]}")
+        for idx in np.where(self.tuned_mask)[0]:
+            print(f"  Cell {idx}: p = {self.t_pval[idx]:.5f}")
 
-        return self.gain_a, self.gain_b
-    
-    # ------------- plotting -------------
-    
     def plot_scatter(self, cell: int = None, ax=None) -> plt.Figure:
         """Scatter plot of running vs. still responses with gain model fit.
 
@@ -1003,8 +1078,8 @@ def run_binary_modulation_analysis(
             still_threshold=still_threshold,
         )
         analysis.compute_mi()
-        analysis.compute_running_ttest()
         analysis.fit_gain_model(min_trials_per_state=min_trials_per_state)
+        analysis.compute_running_ttest()
 
         results[stimulus] = analysis
 
@@ -1645,6 +1720,96 @@ def plot_metadata_validation(aligned: dict, validation_df: pd.DataFrame = None, 
         ax.set_ylabel(ylabel)
 
     return fig, axes
+
+
+def plot_tuned_neurons_grid(computed_tuned: dict[str, np.ndarray],
+                            metadata_tuned: dict[str, np.ndarray] | None = None,
+                            figsize=(6, 10)) -> plt.Figure:
+    """Grid map comparing computed vs metadata-given tuned neurons.
+
+    Each column is a stimulus, each row is a cell. Cells are sorted by
+    descending total tuned-count (any source), then by both-tuned count.
+
+    Parameters
+    ----------
+    computed_tuned : dict[str, np.ndarray]
+        Per-stimulus boolean masks ``(n_cells,)`` for computed tuned neurons
+        (e.g. from :attr:`BinaryModulation.tuned_mask`).
+    metadata_tuned : dict[str, np.ndarray] | None
+        Per-stimulus boolean masks ``(n_cells,)`` for metadata-given tuned
+        neurons (e.g. from ``p_run_mod_* < 0.05``). Stimuli not present in
+        this dict are shown with computed-only tuning.
+    figsize : tuple
+        Figure size.
+
+    Returns
+    -------
+    plt.Figure
+    """
+    labels = list(computed_tuned.keys())
+    I = len(next(iter(computed_tuned.values())))
+    J = len(labels)
+
+    # category colours
+    BOTH_CLR = (0.65, 0.95, 0.65)       # green: both agree tuned
+    COMP_CLR = (0.55, 0.75, 0.95)       # blue: computed only
+    META_CLR = (0.95, 0.75, 0.55)       # orange: metadata only
+    NONE_CLR = (0.97, 0.97, 0.97)       # near-white: neither
+
+    # Build agreement matrix: 0=neither, 1=computed-only, 2=metadata-only, 3=both
+    agreement = np.zeros((I, J), dtype=int)
+    for j, lbl in enumerate(labels):
+        comp = np.asarray(computed_tuned[lbl], dtype=bool)
+        if metadata_tuned is not None and lbl in metadata_tuned:
+            meta = np.asarray(metadata_tuned[lbl], dtype=bool)
+            agreement[:, j] = np.where(comp & meta, 3,
+                                       np.where(comp, 1,
+                                                np.where(meta, 2, 0)))
+        else:
+            agreement[:, j] = comp.astype(int)
+
+    # Sort rows
+    n_tuned_any = (agreement > 0).sum(axis=1)
+    n_both = (agreement == 3).sum(axis=1)
+    order = np.lexsort((-n_tuned_any, -n_both, -np.arange(I)))
+
+    bg_map = {0: NONE_CLR, 1: COMP_CLR, 2: META_CLR, 3: BOTH_CLR}
+
+    # ── Plot ──
+    fig, ax = plt.subplots(figsize=figsize)
+
+    img = np.zeros((I, J, 3))
+    for i in range(I):
+        for j in range(J):
+            img[i, j] = bg_map[agreement[order[i], j]]
+    ax.imshow(img, aspect='auto', interpolation='nearest')
+
+    # Text markers: B = both, C = computed-only, M = metadata-only
+    txt_map = {1: 'C', 2: 'M', 3: 'B'}
+    txt_clr = {1: 'blue', 2: 'darkorange', 3: 'green'}
+    for i in range(I):
+        for j in range(J):
+            val = agreement[order[i], j]
+            if val > 0:
+                ax.text(j, i, txt_map[val], ha='center', va='center',
+                        fontsize=9, color=txt_clr[val], fontweight='bold')
+
+    ax.set(xticks=range(J), xticklabels=labels,
+           yticks=range(I), yticklabels=order,
+           ylabel='cell #', title='Tuned neurons: computed vs metadata')
+    ax.xaxis.set_ticks_position('top')
+    ax.xaxis.set_label_position('top')
+
+    # Legend
+    from matplotlib.patches import Patch as _Patch
+    ax.legend(
+        [_Patch(facecolor=BOTH_CLR), _Patch(facecolor=COMP_CLR),
+         _Patch(facecolor=META_CLR)],
+        ['Both tuned (B)', 'Computed only (C)', 'Metadata only (M)'],
+        loc='upper left', bbox_to_anchor=(1.02, 1), fontsize=9, frameon=False,
+    )
+    fig.tight_layout()
+    return fig
 
 
 # ==============================================================================
