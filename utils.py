@@ -497,15 +497,21 @@ NM_COLOR  = "#71AD77"                        # non-monotonic (teal)
 OTHER_COLOR = '#7f7f7f'                      # "Others" in condition plots
 
 
+def _ensure_ax(ax=None, **subplots_kw):
+    """Return ``(fig, ax)``, creating a new figure if ``ax`` is None."""
+    if ax is None:
+        fig, ax = plt.subplots(**subplots_kw)
+    else:
+        fig = ax.figure
+    return fig, ax
+
+
 def _hex_to_rgb(h: str) -> tuple[float, float, float]:
     """Convert hex colour '#RRGGBB' to (R, G, B) in [0, 1]."""
     h = h.lstrip('#')
     return tuple(int(h[i:i+2], 16) / 255 for i in (0, 2, 4))
 
-POS_RGB = _hex_to_rgb(POS_COLOR)
-NEG_RGB = _hex_to_rgb(NEG_COLOR)
-NM_RGB  = _hex_to_rgb(NM_COLOR)
-DARK_GRAY = (0.3, 0.3, 0.3)  # for blending weak-tuned cells in grid plots
+
 
 
 class SpeedTuning:
@@ -1133,7 +1139,7 @@ def plot_monotonicity_stacked_bar(tunings: dict[str, SpeedTuning],
     plt.Axes
     """
     if ax is None:
-        _, ax = plt.subplots(figsize=figsize)
+        _, ax = _ensure_ax(ax, figsize=figsize)
 
     if colors is None:
         colors = {'positive': POS_COLOR, 'negative': NEG_COLOR,
@@ -1208,7 +1214,7 @@ def plot_rho_pairwise_scatter(tuning_a: SpeedTuning, tuning_b: SpeedTuning,
     assert tuning_b.significant_mask is not None, "call significance_test() first"
 
     if ax is None:
-        _, ax = plt.subplots(figsize=(5, 5))
+        _, ax = _ensure_ax(ax, figsize=(5, 5))
 
     rho_a, rho_b = tuning_a.rho, tuning_b.rho
     sig_a, sig_b = tuning_a.significant_mask, tuning_b.significant_mask
@@ -1272,10 +1278,15 @@ def plot_monotonicity_grid(tunings: dict[str, SpeedTuning],
         assert t.monotonic_mask is not None, "call compute_spearman() first"
         assert t.levene_p_values is not None, "call significance_test() first"
 
+    # colours (matching module-level constants)
+    POS_RGB = _hex_to_rgb(POS_COLOR)
+    NEG_RGB = _hex_to_rgb(NEG_COLOR)
+    NM_RGB  = _hex_to_rgb(NM_COLOR)
+    DARK_GRAY = (0.3, 0.3, 0.3)
+
     J = len(labels)
     I = len(next(iter(tunings.values())).rho)
 
-    # colours (matching module-level constants)
     COLS = {'positive': POS_RGB, 'negative': NEG_RGB, 'non-monotonic': NM_RGB}
     LG = (0.93, 0.93, 0.93)
 
@@ -1759,10 +1770,7 @@ class BinaryModulation:
         if self.mi is None:
             self.compute_mi()
 
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(5, 5))
-        else:
-            fig = ax.figure
+        fig, ax = _ensure_ax(ax, figsize=(5, 5))
 
         if cell is None:
             x = np.asarray(self.r_still, dtype=float)
@@ -1856,10 +1864,7 @@ class BinaryModulation:
         if self.mi is None:
             self.compute_mi()
 
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(5, 4))
-        else:
-            fig = ax.figure
+        fig, ax = _ensure_ax(ax, figsize=(5, 4))
 
         valid_mi = self.mi[np.isfinite(self.mi)]
 
@@ -2272,10 +2277,9 @@ def validate_signsafe_mi_against_metadata(
 ):
     """Validate sign-safe MI against Allen's precomputed running-modulation metrics.
 
-    Same alignment and per-stimulus comparison logic as
-    :func:`validate_mi_against_metadata`, but compares
-    :math:`MI_{\\text{safe}}` (see :func:`compute_sign_safe_mi`) instead of
-    raw or denominator-filtered MI.
+    Aligns per stimulus and compares
+    :math:`MI_{\\text{safe}}` (see :func:`compute_sign_safe_mi`) against
+    Allen's ``run_mod_*`` columns.
 
     Parameters
     ----------
@@ -2371,73 +2375,6 @@ def summarize_gain_model(results: dict) -> pd.DataFrame:
 # ------------- plotting -------------
 
 
-def plot_robust_mi_histograms(results: dict, denom_threshold: float = 1e-3):
-    """Plot the robust MI histogram for each stimulus in ``results``.
-
-    Robust cells satisfy ``|R_run + R_still| > denom_threshold``
-    (see :func:`get_robust_mi`); this is a filter, not a normalization.
-
-    Returns
-    -------
-    fig : matplotlib.figure.Figure
-    axes : np.ndarray of matplotlib.axes.Axes
-    """
-    n = len(results)
-    fig, axes = plt.subplots(1, n, figsize=(4 * n, 4), sharey=True)
-    axes = np.atleast_1d(axes)
-
-    for ax, stimulus in zip(axes, results):
-        mi, robust = get_robust_mi(results[stimulus], denom_threshold)
-        mi_robust = mi[robust]
-        median_mi = np.nanmedian(mi_robust)
-
-        ax.hist(mi_robust, bins=20, alpha=0.8)
-        ax.axvline(median_mi, linestyle="--", color="black", label=f"median={median_mi:.3f}")
-        ax.axvline(0, linestyle=":", color="gray")
-
-        ax.set_xlim(-1, 1)
-        ax.set_title(stimulus)
-        ax.set_xlabel("Robust MI")
-        ax.legend(frameon=False)
-
-    axes[0].set_ylabel("Number of cells")
-    return fig, axes
-
-
-def plot_population_response_scatter(results: dict):
-    """Scatter running- vs. still-trial population responses per stimulus.
-
-    One point is one neuron; x = mean still-trial response, y = mean
-    running-trial response. This plot is descriptive, not a significance
-    test on its own.
-
-    Returns
-    -------
-    fig : matplotlib.figure.Figure
-    axes : np.ndarray of matplotlib.axes.Axes
-    """
-    n = len(results)
-    fig, axes = plt.subplots(1, n, figsize=(4.5 * n, 4), constrained_layout=True)
-    axes = np.atleast_1d(axes)
-
-    for ax, stimulus in zip(axes, results):
-        results[stimulus].plot_scatter(cell=None, ax=ax)
-
-    return fig, axes
-
-
-def plot_condition_gain_example(analysis: BinaryModulation, cell: int, ax=None):
-    """Plot the condition-level gain fit for one representative cell.
-
-    Thin wrapper around :meth:`BinaryModulation.plot_scatter`.
-
-    Returns
-    -------
-    fig : matplotlib.figure.Figure
-    """
-    return analysis.plot_scatter(cell=cell, ax=ax)
-
-
 def plot_grating_natural_paired_scatter(grating_values, natural_values, p_value=None, ax=None):
     """Paired scatter of grating vs. natural-scenes MI for matched cells.
 
@@ -2485,49 +2422,6 @@ def plot_grating_natural_paired_scatter(grating_values, natural_values, p_value=
     return fig, ax
 
 
-def plot_grating_natural_paired_distribution(grating_values, natural_values, p_value=None, ax=None):
-    """Paired boxplot + per-cell connecting lines for grating vs. NS MI.
-
-    Parameters
-    ----------
-    grating_values, natural_values : array-like
-        Matched-cell MI values, e.g. from :func:`compare_gratings_vs_natural`.
-    p_value : float, optional
-        Wilcoxon p-value to annotate in the title.
-    ax : matplotlib.axes.Axes, optional
-
-    Returns
-    -------
-    fig : matplotlib.figure.Figure
-    ax : matplotlib.axes.Axes
-    """
-    grating_values = np.asarray(grating_values, dtype=float)
-    natural_values = np.asarray(natural_values, dtype=float)
-
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(5, 4))
-    else:
-        fig = ax.figure
-
-    ax.boxplot(
-        [grating_values, natural_values],
-        tick_labels=["Gratings\nmean(DG, SG)", "Natural\nscenes"],
-        showfliers=False,
-    )
-
-    for g, n in zip(grating_values, natural_values):
-        ax.plot([1, 2], [g, n], color="gray", alpha=0.25, linewidth=0.8)
-
-    ax.axhline(0, linestyle=":", color="gray")
-    ax.set_ylabel("Robust MI")
-    title = "Paired MI comparison"
-    if p_value is not None:
-        title += f"\nWilcoxon p={p_value:.3g}"
-    ax.set_title(title)
-
-    return fig, ax
-
-
 def plot_metadata_validation(aligned: dict, validation_df: pd.DataFrame = None, ylabel: str = "Robust MI (ours)"):
     """Scatter our MI against Allen ``run_mod_*`` metadata, per stimulus.
 
@@ -2535,7 +2429,6 @@ def plot_metadata_validation(aligned: dict, validation_df: pd.DataFrame = None, 
     ----------
     aligned : dict
         Mapping stimulus -> {"mi": array, "ref": array}, as returned by
-        :func:`validate_mi_against_metadata` or
         :func:`validate_signsafe_mi_against_metadata`.
     validation_df : pandas.DataFrame, optional
         Table with ``stimulus``, ``spearman_rho``, ``p_value``, ``n_cells``
@@ -2930,10 +2823,7 @@ def plot_negative_trace_examples(traces: pd.DataFrame, cell: int, n_examples: in
     fig : matplotlib.figure.Figure
     ax : matplotlib.axes.Axes
     """
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(6, 3.5))
-    else:
-        fig = ax.figure
+    fig, ax = _ensure_ax(ax, figsize=(6, 3.5))
 
     cell_df = traces[traces["cell"] == cell]
     state_colors = {"running": "C1", "still": "C0"}
@@ -2964,66 +2854,6 @@ def plot_negative_trace_examples(traces: pd.DataFrame, cell: int, n_examples: in
     return fig, ax
 
 
-def plot_negative_trace_heatmap(traces: pd.DataFrame, pca_scores=None, ax=None):
-    """Heatmap of trial traces, ordered by cell, state, and optionally PCA score.
-
-    Parameters
-    ----------
-    traces : pandas.DataFrame
-        Output of :func:`extract_negative_trial_traces` (or the ``metadata``
-        returned by :func:`run_negative_trace_pca`, if rows were dropped).
-    pca_scores : np.ndarray, optional
-        PC scores aligned row-for-row with ``traces``; if given, traces are
-        additionally sorted by PC1 within each (cell, state) group.
-    ax : matplotlib.axes.Axes, optional
-
-    Returns
-    -------
-    fig : matplotlib.figure.Figure
-    ax : matplotlib.axes.Axes
-    """
-    df = traces.reset_index(drop=True).copy()
-    sort_cols = ["cell", "state"]
-    if pca_scores is not None:
-        df["_pc1"] = np.asarray(pca_scores)[:, 0]
-        sort_cols = sort_cols + ["_pc1"]
-
-    order = df.sort_values(sort_cols).index.to_numpy()
-    sorted_df = df.loc[order].reset_index(drop=True)
-    matrix = np.vstack(sorted_df["trace"].to_numpy())
-
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(6, max(2, 0.15 * len(order))))
-    else:
-        fig = ax.figure
-
-    vmax = np.nanpercentile(np.abs(matrix), 95)
-    vmax = vmax if vmax > 0 else 1.0
-    im = ax.imshow(matrix, aspect="auto", cmap="coolwarm", vmin=-vmax, vmax=vmax)
-    fig.colorbar(im, ax=ax, label="ΔF/F")
-    ax.set_xlabel("Frame within response window")
-    ax.set_ylabel("Trial")
-
-    # Separators + group labels for each (cell, state) block. Groups are
-    # contiguous because sorted_df is sorted by (cell, state[, PC1]).
-    group_sizes = sorted_df.groupby(["cell", "state"], sort=False).size()
-    yticks, yticklabels = [], []
-    boundary = 0
-    for (cell, state), size in group_sizes.items():
-        yticks.append(boundary + size / 2 - 0.5)
-        yticklabels.append(f"cell {cell}\n({state})")
-        boundary += size
-        if boundary < len(sorted_df):
-            ax.axhline(boundary - 0.5, color="black", linewidth=0.6, alpha=0.6)
-    ax.set_yticks(yticks)
-    ax.set_yticklabels(yticklabels, fontsize=7)
-
-    pc1_note = " — rows ordered by PC1 score within each cell/state group" if pca_scores is not None else ""
-    ax.set_title(f"Trial traces, grouped by cell and state{pc1_note}", fontsize=9)
-
-    return fig, ax
-
-
 def plot_negative_trace_pca_scores(scores, metadata: pd.DataFrame, pc_x: int = 0, pc_y: int = 1, ax=None):
     """Scatter PCA scores, colored by behavioral state, one marker shape per cell.
 
@@ -3043,10 +2873,7 @@ def plot_negative_trace_pca_scores(scores, metadata: pd.DataFrame, pc_x: int = 0
     fig : matplotlib.figure.Figure
     ax : matplotlib.axes.Axes
     """
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(5, 5))
-    else:
-        fig = ax.figure
+    fig, ax = _ensure_ax(ax, figsize=(5, 5))
 
     state_colors = {"running": "C1", "still": "C0"}
     markers = ["o", "s", "^", "D", "P", "X", "v"]
@@ -3094,10 +2921,7 @@ def plot_negative_trace_pcs(components, explained_variance_ratio, n_show: int = 
     fig : matplotlib.figure.Figure
     ax : matplotlib.axes.Axes
     """
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(6, 3.5))
-    else:
-        fig = ax.figure
+    fig, ax = _ensure_ax(ax, figsize=(6, 3.5))
 
     n_show = min(n_show, components.shape[0])
     t = np.arange(components.shape[1])
