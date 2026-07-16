@@ -884,7 +884,9 @@ class EncodingModel:
         """
         ss_res = ((y - yhat) ** 2).sum(axis=1)
         ss_tot = ((y - y.mean(axis=1, keepdims=True)) ** 2).sum(axis=1)
-        return 1.0 - ss_res / ss_tot
+        with np.errstate(divide="ignore", invalid="ignore"):
+            r2 = 1.0 - ss_res / ss_tot
+        return np.where(ss_tot == 0, 0.0, r2)
 
     def fit_all(self, n_folds=5, alphas=None, random_state=0):
         """Fit all four nested models per neuron with cross-validated R².
