@@ -4,8 +4,6 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from dataclasses import dataclass
 from scipy.stats import spearmanr, wilcoxon
-from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
 
 STIMULI = ['drifting_gratings', 'static_gratings', 'natural_scenes', 'spontaneous']
 def check_stim(stimulus:str):
@@ -600,16 +598,40 @@ class BinaryModulation:
         # filled by compute_mi()
         self.r_run = None             # np.ndarray, shape (n_cells,)
         self.r_still = None           # np.ndarray, shape (n_cells,)
-        self.mi = None                # np.ndarray, shape (n_cells,)
+        self.delta_r = None           # np.ndarray, shape (n_cells,); r_run - r_still
+        self.mi = None                # np.ndarray, shape (n_cells,); sign-safe MI
 
         # filled by fit_gain_model()
         self.gain_a = None            # np.ndarray, shape (n_cells,)
         self.gain_b = None            # np.ndarray, shape (n_cells,)
         self.gain_r2 = None           # np.ndarray, shape (n_cells,)
+        self.gain_valid = None        # np.ndarray of bool, shape (n_cells,)
 
         self.condition_still = None   # list length n_cells; each item shape (n_valid_conditions,)
         self.condition_run = None     # list length n_cells; each item shape (n_valid_conditions,)
         self.n_gain_conditions = None # np.ndarray, shape (n_cells,)
+
+        # --- Reserved for a future per-condition modulation test (NOT implemented) ---
+        # A later analysis will, per stimulus and for spontaneous activity,
+        # build matched running/still condition pairs and test them with a
+        # paired t-test to flag modulated neurons. Only the attributes are
+        # reserved here; no test, FDR correction, or cell selection is done.
+        #
+        # Note the distinction from the aggregate quantities above:
+        #   - ``delta_r`` is a single per-cell number: the overall mean
+        #     running response minus the overall mean still response. A
+        #     t-test cannot be run on one aggregate value.
+        #   - ``delta_r_pairs`` will hold, per cell, a *set* of differences
+        #     computed on matched stimulus conditions (r_run_condition minus
+        #     r_still_condition). That paired set is what a future t-test
+        #     would consume.
+        self.r_run_by_condition = None   # future: list/array of per-condition running responses
+        self.r_still_by_condition = None # future: list/array of per-condition still responses
+        self.delta_r_pairs = None        # future: per-cell matched-condition differences
+
+        self.modulation_stat = None      # future: per-cell test statistic
+        self.modulation_p = None         # future: per-cell p-value
+        self.is_modulated = None         # future: per-cell boolean flag
 
     def classify_trials(
         self,
@@ -649,18 +671,45 @@ class BinaryModulation:
 
         return self.run_mask, self.still_mask, self.ignored_mask
 
-    def compute_mi(self):
-        """Compute Modulation Index per cell.
+    def compute_mi(self, epsilon: float = 1e-12):
+        """Compute the sign-safe Modulation Index per cell.
+
+        The formal metric for this analysis is the **sign-safe** MI, which
+        keeps the signed numerator but uses an absolute-sum denominator:
 
         .. math::
 
             MI = \\frac{R_{\\text{run}} - R_{\\text{still}}}
-                       {R_{\\text{run}} + R_{\\text{still}}}
+                       {|R_{\\text{run}}| + |R_{\\text{still}}| + \\epsilon}
+
+        Because ΔF/F responses are signed, the naive denominator
+        :math:`R_{\\text{run}} + R_{\\text{still}}` can be near zero or
+        negative, which makes the naive index unbounded and can flip its
+        sign relative to :math:`R_{\\text{run}} - R_{\\text{still}}`. The
+        absolute-sum denominator is always positive, so :attr:`mi` is bounded
+        in ``[-1, 1]`` and ``sign(mi) == sign(delta_r)`` always holds. The
+        raw / denominator-thresholded ("robust") variants are diagnostic
+        only and live in ``mi_audit_utils`` — this class exposes a single MI.
+
+        Parameters
+        ----------
+        epsilon : float, optional
+            Small positive constant added to the denominator to avoid
+            division by zero when both responses are exactly zero, by
+            default ``1e-12``.
 
         Stores
         ------
+        r_run : np.ndarray, shape ``(n_cells,)``
+            Mean response over running trials.
+        r_still : np.ndarray, shape ``(n_cells,)``
+            Mean response over still trials.
+        delta_r : np.ndarray, shape ``(n_cells,)``
+            ``r_run - r_still`` (denominator-free sensitivity measure). This
+            is one aggregate number per cell; it is *not* a paired set and
+            cannot be fed to a per-cell t-test (see ``delta_r_pairs``).
         mi : np.ndarray, shape ``(n_cells,)``
-            Modulation index for each cell.
+            Sign-safe modulation index for each cell, bounded in ``[-1, 1]``.
         """
         if self.run_mask is None or self.still_mask is None:
             raise ValueError("Please run classify_trials() first.")
@@ -680,20 +729,23 @@ class BinaryModulation:
             self.mi = np.full(n_cells, np.nan)
             self.r_run = np.full(n_cells, np.nan)
             self.r_still = np.full(n_cells, np.nan)
+            self.delta_r = np.full(n_cells, np.nan)
             return self.mi
 
         # Average response across running / still trials for each cell.
-        self.r_run = np.nanmean(response_mean[:, self.run_mask], axis=1)      # (n_cells,)
-        self.r_still = np.nanmean(response_mean[:, self.still_mask], axis=1)  # (n_cells,)
+        # Upcast to float64 before the ratio: ΔF/F is stored as float32, and
+        # computing the denominator in float32 would perturb near-±1 indices
+        # at the ~1e-8 level, which is enough to flip Spearman ranks in the
+        # metadata validation. float64 keeps the sign-safe MI stable.
+        self.r_run = np.nanmean(response_mean[:, self.run_mask], axis=1).astype(float)      # (n_cells,)
+        self.r_still = np.nanmean(response_mean[:, self.still_mask], axis=1).astype(float)  # (n_cells,)
+        self.delta_r = self.r_run - self.r_still
 
-        denom = self.r_run + self.r_still
+        denom = np.abs(self.r_run) + np.abs(self.r_still) + epsilon
 
         self.mi = np.full(n_cells, np.nan, dtype=float)
-        valid = np.isfinite(denom) & (np.abs(denom) > 1e-12)
-
-        self.mi[valid] = (
-            self.r_run[valid] - self.r_still[valid]
-        ) / denom[valid]
+        finite = np.isfinite(self.r_run) & np.isfinite(self.r_still)
+        self.mi[finite] = self.delta_r[finite] / denom[finite]
 
         return self.mi
 
@@ -737,8 +789,20 @@ class BinaryModulation:
             )
         return labels
         
-    def fit_gain_model(self, min_trials_per_state: int = 2):
+    def fit_gain_model(self, min_trials_per_state: int = 2, min_conditions: int = 3):
         """Fit linear gain model: :math:`R_{\\text{run}} = a \\cdot R_{\\text{still}} + b`.
+
+        Parameters
+        ----------
+        min_trials_per_state : int, optional
+            Minimum number of running and (separately) still trials a
+            stimulus condition must have to contribute a data point to the
+            fit, by default 2.
+        min_conditions : int, optional
+            Minimum number of valid condition pairs a cell must have before
+            a line is fit at all, by default 3. A 2-point fit is always a
+            perfect but meaningless line, so this is deliberately larger
+            than the 2-point minimum ``np.polyfit`` would accept.
 
         Stores
         ------
@@ -746,6 +810,12 @@ class BinaryModulation:
             Multiplicative coefficient.
         gain_b : np.ndarray, shape ``(n_cells,)``
             Additive offset.
+        gain_valid : np.ndarray of bool, shape ``(n_cells,)``
+            True only where the fit used at least ``min_conditions`` points
+            with non-degenerate ``still`` values, and produced finite slope,
+            intercept, and R². Always fully initialized (all False for
+            stimuli with no condition structure, e.g. spontaneous), never
+            left as ``None``.
         """
         if self.run_mask is None or self.still_mask is None:
             self.classify_trials()
@@ -757,21 +827,24 @@ class BinaryModulation:
 
         n_cells, n_trials = response_mean.shape
         labels = self.get_condition_labels()
-        
+
         self.gain_a = np.full(n_cells, np.nan)
         self.gain_b = np.full(n_cells, np.nan)
         self.gain_r2 = np.full(n_cells, np.nan)
+        self.gain_valid = np.zeros(n_cells, dtype=bool)
         self.n_gain_conditions = np.zeros(n_cells, dtype=int)
         self.condition_still = [
             np.array([], dtype=float) for _ in range(n_cells)
-        ] 
+        ]
         self.condition_run = [
             np.array([], dtype=float) for _ in range(n_cells)
         ]
 
         if labels is None:
+            # No visual-stimulus condition structure (e.g. spontaneous): the
+            # gain model is undefined, and gain_valid is all False.
             return self.gain_a, self.gain_b
-        
+
         unique_conditions = pd.unique(labels)
         for cell_index in range(n_cells):
             still_values = []
@@ -789,11 +862,11 @@ class BinaryModulation:
                     continue
                 mean_still = np.nanmean(response_mean[cell_index, mask_c_still])
                 mean_run = np.nanmean(response_mean[cell_index, mask_c_run])
-                
+
                 if np.isfinite(mean_still) and np.isfinite(mean_run):
                     still_values.append(mean_still)
                     run_values.append(mean_run)
-            
+
             run_values = np.asarray(run_values, dtype=float)
             still_values = np.asarray(still_values, dtype=float)
 
@@ -801,9 +874,14 @@ class BinaryModulation:
             self.condition_still[cell_index] = still_values
             self.n_gain_conditions[cell_index] = len(run_values)
 
-            if len(run_values) < min_trials_per_state:
+            if len(run_values) < min_conditions:
                 continue
-            
+
+            # A (near-)constant set of still-condition values makes the
+            # still -> run line unidentifiable (rank-deficient fit).
+            if np.ptp(still_values) <= 1e-12:
+                continue
+
             slope, intercept = np.polyfit(still_values, run_values, deg=1)
 
             #check the quality of the fit
@@ -815,6 +893,12 @@ class BinaryModulation:
 
             self.gain_a[cell_index] = slope
             self.gain_b[cell_index] = intercept
+
+            self.gain_valid[cell_index] = (
+                np.isfinite(slope)
+                and np.isfinite(intercept)
+                and np.isfinite(self.gain_r2[cell_index])
+            )
 
         return self.gain_a, self.gain_b
     
@@ -920,11 +1004,15 @@ class BinaryModulation:
 
         return fig
 
-    def plot_mi_histogram(self, ax=None) -> plt.Figure:
-        """Histogram of Modulation Index across the population.
+    def plot_mi_distribution(self, ax=None) -> plt.Figure:
+        """Histogram of the sign-safe Modulation Index across the population.
 
-        Optionally mark the median MI and compare to a null distribution
-        (e.g. shuffle labels).
+        Uses the bounded ``[-1, 1]`` sign-safe MI stored in :attr:`mi` and
+        marks the population median and the no-modulation line at zero.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes, optional
         """
         if self.mi is None:
             self.compute_mi()
@@ -935,19 +1023,54 @@ class BinaryModulation:
             fig = ax.figure
 
         valid_mi = self.mi[np.isfinite(self.mi)]
-
-        ax.hist(valid_mi, bins=20, alpha=0.8)
         median_mi = np.nanmedian(valid_mi)
 
-        ax.axvline(median_mi, linestyle="--", color="black", label=f"median={median_mi:.3f}")
-        ax.axvline(0, linestyle=":", color="gray")
+        ax.hist(valid_mi, bins=20, range=(-1, 1), alpha=0.8, color="C0")
+        ax.axvline(median_mi, linestyle="--", color="black", label=f"median = {median_mi:+.3f}")
+        ax.axvline(0, linestyle=":", color="gray", label="no modulation")
 
-        ax.set_xlabel("Modulation Index")
+        ax.set_xlim(-1, 1)
+        ax.set_xlabel("Sign-safe MI")
         ax.set_ylabel("Number of cells")
-        ax.set_title(f"{self._td.stimulus}: MI distribution")
-        ax.legend()
+        ax.set_title(f"{self._td.stimulus}\nn = {int(np.isfinite(self.mi).sum())} cells")
+        ax.legend(frameon=False, fontsize=8)
 
         return fig
+
+    def to_dataframe(self) -> pd.DataFrame:
+        """Return per-cell results as a tidy DataFrame.
+
+        One row per cell with the classified-response quantities and the
+        fitted gain parameters. ``compute_mi`` (and, for the gain columns,
+        ``fit_gain_model``) must have been run first.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Columns: stimulus, cell, r_run, r_still, delta_r, mi, and (when
+            available) gain_a, gain_b, gain_r2, gain_valid, n_gain_conditions.
+        """
+        if self.mi is None:
+            raise ValueError("Please run compute_mi() first.")
+
+        n_cells = len(self.mi)
+        df = pd.DataFrame({
+            "stimulus": self._td.stimulus,
+            "cell": np.arange(n_cells),
+            "r_run": np.asarray(self.r_run, dtype=float),
+            "r_still": np.asarray(self.r_still, dtype=float),
+            "delta_r": np.asarray(self.delta_r, dtype=float),
+            "mi": np.asarray(self.mi, dtype=float),
+        })
+
+        if self.gain_a is not None:
+            df["gain_a"] = np.asarray(self.gain_a, dtype=float)
+            df["gain_b"] = np.asarray(self.gain_b, dtype=float)
+            df["gain_r2"] = np.asarray(self.gain_r2, dtype=float)
+            df["gain_valid"] = np.asarray(self.gain_valid, dtype=bool)
+            df["n_gain_conditions"] = np.asarray(self.n_gain_conditions, dtype=int)
+
+        return df
 
 
 # ==============================================================================
@@ -961,6 +1084,7 @@ def run_binary_modulation_analysis(
     run_threshold: float = 3.0,
     still_threshold: float = 0.5,
     min_trials_per_state: int = 1,
+    min_gain_conditions: int = 3,
 ) -> dict:
     """Run the full binary running/still pipeline for each stimulus.
 
@@ -981,7 +1105,12 @@ def run_binary_modulation_analysis(
     run_threshold, still_threshold : float
         Passed to :meth:`BinaryModulation.classify_trials`.
     min_trials_per_state : int
-        Passed to :meth:`BinaryModulation.fit_gain_model`.
+        Minimum running/still trials per condition; passed to
+        :meth:`BinaryModulation.fit_gain_model`.
+    min_gain_conditions : int
+        Minimum number of valid condition pairs required before a gain line
+        is fit at all; passed to :meth:`BinaryModulation.fit_gain_model` as
+        ``min_conditions``.
 
     Returns
     -------
@@ -1002,45 +1131,14 @@ def run_binary_modulation_analysis(
             still_threshold=still_threshold,
         )
         analysis.compute_mi()
-        analysis.fit_gain_model(min_trials_per_state=min_trials_per_state)
+        analysis.fit_gain_model(
+            min_trials_per_state=min_trials_per_state,
+            min_conditions=min_gain_conditions,
+        )
 
         results[stimulus] = analysis
 
     return results
-
-
-def get_robust_mi(analysis: BinaryModulation, denom_threshold: float = 1e-3):
-    """Return raw MI together with a robust-cell mask.
-
-    A cell is "robust" if its MI is finite, its denominator
-    (:math:`R_{\\text{run}} + R_{\\text{still}}`) is finite, and
-    :math:`|R_{\\text{run}} + R_{\\text{still}}| > \\text{denom\\_threshold}`.
-    This is a *filter*, not a normalization of MI itself.
-
-    Parameters
-    ----------
-    analysis : BinaryModulation
-        Analysis with :meth:`compute_mi` already run.
-    denom_threshold : float, optional
-        Minimum allowed ``|R_run + R_still|``, by default ``1e-3``.
-
-    Returns
-    -------
-    mi : np.ndarray, shape (n_cells,)
-        Raw modulation index (unchanged).
-    robust : np.ndarray of bool, shape (n_cells,)
-        Mask of cells passing the robustness filter.
-    """
-    mi = analysis.mi
-    denom = analysis.r_run + analysis.r_still
-
-    robust = (
-        np.isfinite(mi)
-        & np.isfinite(denom)
-        & (np.abs(denom) > denom_threshold)
-    )
-
-    return mi, robust
 
 
 def summarize_binary_modulation_runs(results: dict) -> pd.DataFrame:
@@ -1056,7 +1154,7 @@ def summarize_binary_modulation_runs(results: dict) -> pd.DataFrame:
     -------
     pandas.DataFrame
         Columns: stimulus, n_trials, n_running, n_still, n_ignored,
-        median_MI, valid_gain_fits.
+        median_sign_safe_MI, valid_gain_fits.
     """
     rows = []
     for stimulus, analysis in results.items():
@@ -1066,72 +1164,46 @@ def summarize_binary_modulation_runs(results: dict) -> pd.DataFrame:
             "n_running": int(analysis.run_mask.sum()),
             "n_still": int(analysis.still_mask.sum()),
             "n_ignored": int(analysis.ignored_mask.sum()),
-            "median_MI": float(np.nanmedian(analysis.mi)),
-            "valid_gain_fits": int(np.isfinite(analysis.gain_a).sum()),
+            "median_sign_safe_MI": float(np.nanmedian(analysis.mi)),
+            "valid_gain_fits": int(np.asarray(analysis.gain_valid, dtype=bool).sum()),
         })
     return pd.DataFrame(rows)
 
 
-def summarize_mi_by_stimulus(results: dict, denom_threshold: float = 1e-3) -> pd.DataFrame:
-    """Per-stimulus summary of raw vs. robust modulation index.
-
-    Parameters
-    ----------
-    results : dict
-        Mapping stimulus -> :class:`BinaryModulation`.
-    denom_threshold : float, optional
-        Passed to :func:`get_robust_mi`, by default ``1e-3``.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Columns: stimulus, n_cells, n_robust, n_excluded, median_MI_raw,
-        median_MI_robust, mean_MI_robust, median_delta_R,
-        frac_positive_MI_robust.
-    """
-    rows = []
-    for stimulus, analysis in results.items():
-        mi, robust = get_robust_mi(analysis, denom_threshold)
-        finite = np.isfinite(mi)
-        delta = analysis.r_run - analysis.r_still
-
-        rows.append({
-            "stimulus": stimulus,
-            "n_cells": len(mi),
-            "n_robust": int(robust.sum()),
-            "n_excluded": int(finite.sum() - robust.sum()),
-            "median_MI_raw": float(np.nanmedian(mi[finite])),
-            "median_MI_robust": float(np.nanmedian(mi[robust])),
-            "mean_MI_robust": float(np.nanmean(mi[robust])),
-            "median_delta_R": float(np.nanmedian(delta[robust])),
-            "frac_positive_MI_robust": float(np.mean(mi[robust] > 0)),
-        })
-    return pd.DataFrame(rows)
+# ==============================================================================
+# Analysis 2 — downstream comparisons on the sign-safe MI
+# ==============================================================================
+#
+# BinaryModulation.compute_mi() produces the sign-safe MI (numerator
+# R_run - R_still over denominator |R_run| + |R_still| + epsilon), which is
+# bounded in [-1, 1] and whose sign always matches R_run - R_still. The
+# functions below consume that single formal metric (analysis.mi). The raw
+# and denominator-thresholded ("robust") MI variants and all their
+# diagnostics live separately in mi_audit_utils.py.
 
 
-def compare_gratings_vs_natural(results: dict, denom_threshold: float = 1e-3):
-    """Paired grating-vs-natural-scenes comparison of robust MI.
+def compare_gratings_vs_natural(results: dict):
+    """Paired grating-vs-natural-scenes comparison using the sign-safe MI.
 
-    Trials are never pooled across stimulus classes: MI is computed
-    separately for drifting gratings, static gratings, and natural
-    scenes, and only the resulting per-cell MI values are combined.
-    For each matched cell, grating MI is the mean of the (robust)
-    drifting- and static-grating MI:
+    Compares :attr:`BinaryModulation.mi` (the single formal metric, see
+    :meth:`BinaryModulation.compute_mi`) for matched cells. Trials are never
+    pooled across stimulus classes: MI is computed separately for drifting
+    gratings, static gratings, and natural scenes, and only the resulting
+    per-cell values are combined. For each matched cell, grating MI is the
+    mean of the drifting- and static-grating MI:
 
     .. math::
         MI_{\\text{grating}} = \\text{mean}(MI_{\\text{DG}}, MI_{\\text{SG}})
 
-    ``MI_grating`` is then compared against natural-scenes MI with a
-    paired Wilcoxon signed-rank test, using only cells with a valid
-    robust MI for DG, SG, and NS.
+    ``MI_grating`` is compared against natural-scenes MI with a paired
+    Wilcoxon signed-rank test, using only cells with a finite MI for DG, SG,
+    and NS.
 
     Parameters
     ----------
     results : dict
         Must contain ``"drifting_gratings"``, ``"static_gratings"``, and
         ``"natural_scenes"`` keys mapping to :class:`BinaryModulation`.
-    denom_threshold : float, optional
-        Passed to :func:`get_robust_mi`, by default ``1e-3``.
 
     Returns
     -------
@@ -1144,268 +1216,12 @@ def compare_gratings_vs_natural(results: dict, denom_threshold: float = 1e-3):
     natural_values : np.ndarray
         Natural-scenes MI for the matched, valid cells.
     """
-    mi_dg, robust_dg = get_robust_mi(results["drifting_gratings"], denom_threshold)
-    mi_sg, robust_sg = get_robust_mi(results["static_gratings"], denom_threshold)
-    mi_ns, robust_ns = get_robust_mi(results["natural_scenes"], denom_threshold)
-
-    mi_grating = np.nanmean(np.vstack([mi_dg, mi_sg]), axis=0)
-    robust_grating = robust_dg & robust_sg & np.isfinite(mi_grating)
-
-    valid = robust_grating & robust_ns & np.isfinite(mi_grating) & np.isfinite(mi_ns)
-
-    grating_values = mi_grating[valid]
-    natural_values = mi_ns[valid]
-
-    stat, p = wilcoxon(grating_values, natural_values)
-
-    result_df = pd.DataFrame([{
-        "comparison": "gratings_vs_natural_scenes",
-        "n_cells": int(valid.sum()),
-        "median_grating_MI": float(np.nanmedian(grating_values)),
-        "median_natural_scene_MI": float(np.nanmedian(natural_values)),
-        "median_difference_NS_minus_grating": float(np.nanmedian(natural_values - grating_values)),
-        "wilcoxon_stat": float(stat),
-        "p_value": float(p),
-        "frac_NS_greater_than_grating": float(np.mean(natural_values > grating_values)),
-    }])
-
-    return result_df, valid, grating_values, natural_values
-
-
-def validate_mi_against_metadata(
-    results: dict,
-    metadata: pd.DataFrame,
-    matched_cell_ids,
-    denom_threshold: float = 1e-3,
-    robust: bool = True,
-):
-    """Validate our MI against Allen's precomputed running-modulation metrics.
-
-    Aligns ``metadata`` to ``matched_cell_ids`` (by ``cell_specimen_id``)
-    and compares, per stimulus, our MI with the corresponding Allen
-    ``run_mod_*`` column using Spearman correlation.
-
-    Parameters
-    ----------
-    results : dict
-        Must contain ``"drifting_gratings"``, ``"static_gratings"``, and
-        ``"natural_scenes"`` keys mapping to :class:`BinaryModulation`.
-    metadata : pandas.DataFrame
-        Table containing ``cell_specimen_id``, ``run_mod_dg``,
-        ``run_mod_sg``, ``run_mod_ns`` columns.
-    matched_cell_ids : array-like
-        Cell IDs defining row order (typically ``data["matched_cell_ids"]``).
-    denom_threshold : float, optional
-        Passed to :func:`get_robust_mi`, by default ``1e-3``.
-    robust : bool, optional
-        If True (default), use robust MI (see :func:`get_robust_mi`).
-        If False, use raw MI with no denominator-based filtering.
-
-    Returns
-    -------
-    validation_df : pandas.DataFrame
-        Columns: stimulus, metadata_col, n_cells, spearman_rho, p_value,
-        median_our_MI, median_metadata_run_mod.
-    aligned : dict
-        Mapping stimulus -> {"mi": array, "ref": array} of the valid,
-        aligned values used for the correlation (and for plotting).
-    """
-    meta = metadata.set_index("cell_specimen_id").loc[matched_cell_ids]
-
-    mapping = {
-        "drifting_gratings": "run_mod_dg",
-        "static_gratings": "run_mod_sg",
-        "natural_scenes": "run_mod_ns",
-    }
-
-    rows = []
-    aligned = {}
-    for stimulus, meta_col in mapping.items():
-        analysis = results[stimulus]
-
-        if robust:
-            mi, robust_mask = get_robust_mi(analysis, denom_threshold)
-        else:
-            mi = analysis.mi
-            robust_mask = np.ones_like(mi, dtype=bool)
-
-        ref = meta[meta_col].to_numpy()
-        valid = robust_mask & np.isfinite(mi) & np.isfinite(ref)
-
-        rho, pval = spearmanr(mi[valid], ref[valid])
-
-        rows.append({
-            "stimulus": stimulus,
-            "metadata_col": meta_col,
-            "n_cells": int(valid.sum()),
-            "spearman_rho": float(rho),
-            "p_value": float(pval),
-            "median_our_MI": float(np.nanmedian(mi[valid])),
-            "median_metadata_run_mod": float(np.nanmedian(ref[valid])),
-        })
-        aligned[stimulus] = {"mi": mi[valid], "ref": ref[valid]}
-
-    return pd.DataFrame(rows), aligned
-
-
-# ==============================================================================
-# Analysis 2 — sign-safe modulation index
-# ==============================================================================
-#
-# The raw MI (BinaryModulation.compute_mi) uses R_run + R_still as its
-# denominator. For signed ΔF/F responses this denominator can itself be
-# negative, which can reverse the sign of MI relative to the biologically
-# meaningful direction of R_run - R_still. These helpers do not alter
-# compute_mi() or its output; they add a sign-safe alternative that keeps
-# the signed numerator but replaces the denominator with |R_run| + |R_still|,
-# which is never negative.
-
-
-def compute_sign_safe_mi(analysis: BinaryModulation, epsilon: float = 1e-12):
-    """Compute the sign-safe modulation index for one analysis.
-
-    .. math::
-
-        MI_{\\text{safe}} = \\frac{R_{\\text{run}} - R_{\\text{still}}}
-            {|R_{\\text{run}}| + |R_{\\text{still}}| + \\epsilon}
-
-    Unlike the raw MI, this denominator is always positive, so
-    :math:`\\mathrm{sign}(MI_{\\text{safe}})` always matches
-    :math:`\\mathrm{sign}(R_{\\text{run}} - R_{\\text{still}})`, and
-    :math:`MI_{\\text{safe}}` is always bounded in ``[-1, 1]``.
-
-    Parameters
-    ----------
-    analysis : BinaryModulation
-        Analysis with :meth:`BinaryModulation.compute_mi` already run, so
-        ``r_run`` / ``r_still`` are populated.
-    epsilon : float, optional
-        Small constant added to the denominator only to avoid division by
-        zero when both responses are exactly zero, by default ``1e-12``.
-
-    Returns
-    -------
-    mi_safe : np.ndarray, shape ``(n_cells,)``
-    denominator_safe : np.ndarray, shape ``(n_cells,)``
-        ``|R_run| + |R_still| + epsilon``.
-    finite_mask : np.ndarray of bool, shape ``(n_cells,)``
-        True where ``r_run`` and ``r_still`` are both finite.
-    """
-    r_run = np.asarray(analysis.r_run, dtype=float)
-    r_still = np.asarray(analysis.r_still, dtype=float)
-
-    finite_mask = np.isfinite(r_run) & np.isfinite(r_still)
-
-    denominator_safe = np.abs(r_run) + np.abs(r_still) + epsilon
-
-    mi_safe = np.full(r_run.shape, np.nan, dtype=float)
-    mi_safe[finite_mask] = (
-        r_run[finite_mask] - r_still[finite_mask]
-    ) / denominator_safe[finite_mask]
-
-    return mi_safe, denominator_safe, finite_mask
-
-
-def summarize_mi_versions(results: dict, epsilon: float = 1e-12) -> pd.DataFrame:
-    """Per-stimulus comparison of raw MI, sign-safe MI, and delta_R.
-
-    Parameters
-    ----------
-    results : dict
-        Mapping stimulus -> :class:`BinaryModulation` (already has
-        :meth:`compute_mi` run).
-    epsilon : float, optional
-        Passed to :func:`compute_sign_safe_mi`, by default ``1e-12``.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Columns: stimulus, n_cells, n_negative_raw_denominator,
-        n_raw_sign_reversal, n_abs_raw_mi_gt_1, median_raw_mi,
-        median_safe_mi, median_delta_R, fraction_positive_raw_mi,
-        fraction_positive_safe_mi, fraction_positive_delta_R.
-    """
-    rows = []
-    for stimulus, analysis in results.items():
-        r_run = np.asarray(analysis.r_run, dtype=float)
-        r_still = np.asarray(analysis.r_still, dtype=float)
-        mi_raw = np.asarray(analysis.mi, dtype=float)
-        delta_r = r_run - r_still
-
-        mi_safe, _, _ = compute_sign_safe_mi(analysis, epsilon=epsilon)
-
-        raw_denom = r_run + r_still
-        negative_raw_denominator = np.isfinite(raw_denom) & (raw_denom < 0)
-
-        finite_raw = np.isfinite(mi_raw) & np.isfinite(delta_r)
-        sign_reversal = np.zeros(len(mi_raw), dtype=bool)
-        sign_reversal[finite_raw] = (
-            np.sign(mi_raw[finite_raw]) != np.sign(delta_r[finite_raw])
-        )
-
-        abs_mi_gt_1 = np.isfinite(mi_raw) & (np.abs(mi_raw) > 1)
-
-        finite_mi_raw = mi_raw[np.isfinite(mi_raw)]
-        finite_mi_safe = mi_safe[np.isfinite(mi_safe)]
-        finite_delta_r = delta_r[np.isfinite(delta_r)]
-
-        rows.append({
-            "stimulus": stimulus,
-            "n_cells": len(mi_raw),
-            "n_negative_raw_denominator": int(negative_raw_denominator.sum()),
-            "n_raw_sign_reversal": int(sign_reversal.sum()),
-            "n_abs_raw_mi_gt_1": int(abs_mi_gt_1.sum()),
-            "median_raw_mi": float(np.nanmedian(finite_mi_raw)) if finite_mi_raw.size else float("nan"),
-            "median_safe_mi": float(np.nanmedian(finite_mi_safe)) if finite_mi_safe.size else float("nan"),
-            "median_delta_R": float(np.nanmedian(finite_delta_r)) if finite_delta_r.size else float("nan"),
-            "fraction_positive_raw_mi": float(np.mean(finite_mi_raw > 0)) if finite_mi_raw.size else float("nan"),
-            "fraction_positive_safe_mi": float(np.mean(finite_mi_safe > 0)) if finite_mi_safe.size else float("nan"),
-            "fraction_positive_delta_R": float(np.mean(finite_delta_r > 0)) if finite_delta_r.size else float("nan"),
-        })
-
-    return pd.DataFrame(rows)
-
-
-def compare_gratings_vs_natural_signsafe(results: dict, epsilon: float = 1e-12):
-    """Paired grating-vs-natural-scenes comparison using sign-safe MI.
-
-    Mirrors :func:`compare_gratings_vs_natural`, but compares
-    :math:`MI_{\\text{safe}}` (see :func:`compute_sign_safe_mi`) instead of
-    the raw, denominator-unstable MI. Trials are never pooled across
-    stimulus classes: MI_safe is computed separately for drifting
-    gratings, static gratings, and natural scenes, and only the resulting
-    per-cell values are combined. For each matched cell, grating MI_safe
-    is the mean of the drifting- and static-grating MI_safe:
-
-    .. math::
-        MI_{\\text{safe,grating}} = \\text{mean}(MI_{\\text{safe,DG}}, MI_{\\text{safe,SG}})
-
-    ``MI_safe_grating`` is compared against natural-scenes MI_safe with a
-    paired Wilcoxon signed-rank test, using only cells with a finite
-    MI_safe for DG, SG, and NS.
-
-    Parameters
-    ----------
-    results : dict
-        Must contain ``"drifting_gratings"``, ``"static_gratings"``, and
-        ``"natural_scenes"`` keys mapping to :class:`BinaryModulation`.
-    epsilon : float, optional
-        Passed to :func:`compute_sign_safe_mi`, by default ``1e-12``.
-
-    Returns
-    -------
-    result_df : pandas.DataFrame
-        One-row summary of the paired comparison.
-    valid : np.ndarray of bool, shape (n_cells,)
-        Mask of cells used in the comparison.
-    grating_values : np.ndarray
-        Grating MI_safe for the matched, valid cells.
-    natural_values : np.ndarray
-        Natural-scenes MI_safe for the matched, valid cells.
-    """
-    mi_dg, _, finite_dg = compute_sign_safe_mi(results["drifting_gratings"], epsilon=epsilon)
-    mi_sg, _, finite_sg = compute_sign_safe_mi(results["static_gratings"], epsilon=epsilon)
-    mi_ns, _, finite_ns = compute_sign_safe_mi(results["natural_scenes"], epsilon=epsilon)
+    mi_dg = np.asarray(results["drifting_gratings"].mi, dtype=float)
+    mi_sg = np.asarray(results["static_gratings"].mi, dtype=float)
+    mi_ns = np.asarray(results["natural_scenes"].mi, dtype=float)
+    finite_dg = np.isfinite(mi_dg)
+    finite_sg = np.isfinite(mi_sg)
+    finite_ns = np.isfinite(mi_ns)
 
     mi_grating = np.nanmean(np.vstack([mi_dg, mi_sg]), axis=0)
 
@@ -1420,10 +1236,10 @@ def compare_gratings_vs_natural_signsafe(results: dict, epsilon: float = 1e-12):
     stat, p = wilcoxon(grating_values, natural_values)
 
     result_df = pd.DataFrame([{
-        "comparison": "gratings_vs_natural_scenes_signsafe",
+        "comparison": "gratings_vs_natural_scenes",
         "n_cells": int(valid.sum()),
-        "median_grating_MI_safe": float(np.nanmedian(grating_values)),
-        "median_natural_scene_MI_safe": float(np.nanmedian(natural_values)),
+        "median_grating_mi": float(np.nanmedian(grating_values)),
+        "median_natural_scene_mi": float(np.nanmedian(natural_values)),
         "median_difference_NS_minus_grating": float(np.nanmedian(natural_values - grating_values)),
         "wilcoxon_stat": float(stat),
         "p_value": float(p),
@@ -1433,18 +1249,18 @@ def compare_gratings_vs_natural_signsafe(results: dict, epsilon: float = 1e-12):
     return result_df, valid, grating_values, natural_values
 
 
-def validate_signsafe_mi_against_metadata(
+def validate_mi_against_metadata(
     results: dict,
     metadata: pd.DataFrame,
     matched_cell_ids,
-    epsilon: float = 1e-12,
 ):
-    """Validate sign-safe MI against Allen's precomputed running-modulation metrics.
+    """Validate the sign-safe MI against Allen's precomputed running-modulation metrics.
 
-    Same alignment and per-stimulus comparison logic as
-    :func:`validate_mi_against_metadata`, but compares
-    :math:`MI_{\\text{safe}}` (see :func:`compute_sign_safe_mi`) instead of
-    raw or denominator-filtered MI.
+    Aligns ``metadata`` to ``matched_cell_ids`` and compares, per stimulus,
+    :attr:`BinaryModulation.mi` (the formal metric) against the Allen
+    ``run_mod_*`` column with a Spearman correlation. The raw /
+    denominator-filtered validation is diagnostic and lives in
+    ``mi_audit_utils``.
 
     Parameters
     ----------
@@ -1456,14 +1272,12 @@ def validate_signsafe_mi_against_metadata(
         ``run_mod_sg``, ``run_mod_ns`` columns.
     matched_cell_ids : array-like
         Cell IDs defining row order (typically ``data["matched_cell_ids"]``).
-    epsilon : float, optional
-        Passed to :func:`compute_sign_safe_mi`, by default ``1e-12``.
 
     Returns
     -------
     validation_df : pandas.DataFrame
         Columns: stimulus, metadata_col, n_cells, spearman_rho, p_value,
-        median_our_MI_safe, median_metadata_run_mod.
+        median_our_mi, median_metadata_run_mod.
     aligned : dict
         Mapping stimulus -> {"mi": array, "ref": array} of the valid,
         aligned values used for the correlation (and for plotting).
@@ -1480,7 +1294,8 @@ def validate_signsafe_mi_against_metadata(
     aligned = {}
     for stimulus, meta_col in mapping.items():
         analysis = results[stimulus]
-        mi_safe, _, finite_mask = compute_sign_safe_mi(analysis, epsilon=epsilon)
+        mi_safe = np.asarray(analysis.mi, dtype=float)
+        finite_mask = np.isfinite(mi_safe)
 
         ref = meta[meta_col].to_numpy()
         valid = finite_mask & np.isfinite(mi_safe) & np.isfinite(ref)
@@ -1493,7 +1308,7 @@ def validate_signsafe_mi_against_metadata(
             "n_cells": int(valid.sum()),
             "spearman_rho": float(rho),
             "p_value": float(pval),
-            "median_our_MI_safe": float(np.nanmedian(mi_safe[valid])),
+            "median_our_mi": float(np.nanmedian(mi_safe[valid])),
             "median_metadata_run_mod": float(np.nanmedian(ref[valid])),
         })
         aligned[stimulus] = {"mi": mi_safe[valid], "ref": ref[valid]}
@@ -1523,7 +1338,7 @@ def summarize_gain_model(results: dict) -> pd.DataFrame:
         if stimulus == "spontaneous":
             continue
 
-        valid = np.isfinite(analysis.gain_a) & np.isfinite(analysis.gain_b)
+        valid = np.asarray(analysis.gain_valid, dtype=bool)
 
         rows.append({
             "stimulus": stimulus,
@@ -1540,89 +1355,80 @@ def summarize_gain_model(results: dict) -> pd.DataFrame:
 # ------------- plotting -------------
 
 
-def plot_raw_mi_histograms(results: dict):
-    """Plot the raw MI histogram for each stimulus in ``results``.
+def plot_metric_comparison(
+    binary_results: dict,
+    stimuli=None,
+    metric: str = "mi",
+    bins: int = 20,
+    value_range=None,
+    ax=None,
+):
+    """Compare one per-cell metric across an arbitrary set of stimuli.
+
+    Draws a one-row grid of histograms, one panel per stimulus, for the
+    chosen metric read directly off each :class:`BinaryModulation` instance.
+    This is the single generic cross-stimulus comparison helper; it replaces
+    the earlier per-metric, per-stimulus-combination plotting functions and
+    works for any subset of stimuli.
+
+    Parameters
+    ----------
+    binary_results : dict
+        Mapping stimulus -> :class:`BinaryModulation` (``compute_mi`` run).
+    stimuli : iterable of str or None, optional
+        Which stimuli to show and in what order. ``None`` (default) uses all
+        keys of ``binary_results``.
+    metric : str, optional
+        Attribute name to read per cell, e.g. ``"mi"`` (sign-safe MI, the
+        default) or ``"delta_r"``.
+    bins : int, optional
+        Histogram bin count, by default 20.
+    value_range : tuple or None, optional
+        ``(low, high)`` histogram range. Defaults to ``(-1, 1)`` for
+        ``metric="mi"`` (which is bounded) and to data range otherwise.
+    ax : array-like of matplotlib.axes.Axes, optional
+        Pre-made axes (one per stimulus). If ``None``, a figure is created.
 
     Returns
     -------
     fig : matplotlib.figure.Figure
     axes : np.ndarray of matplotlib.axes.Axes
     """
-    n = len(results)
-    fig, axes = plt.subplots(1, n, figsize=(4.5 * n, 4), sharey=True, constrained_layout=True)
+    if stimuli is None:
+        stimuli = list(binary_results)
+    stimuli = list(stimuli)
+
+    if value_range is None and metric == "mi":
+        value_range = (-1, 1)
+
+    if ax is None:
+        fig, axes = plt.subplots(
+            1, len(stimuli), figsize=(4.2 * len(stimuli), 3.8),
+            sharey=True, constrained_layout=True,
+        )
+    else:
+        axes = ax
+        fig = np.atleast_1d(axes)[0].figure
     axes = np.atleast_1d(axes)
 
-    for ax, stimulus in zip(axes, results):
-        results[stimulus].plot_mi_histogram(ax=ax)
+    for panel, stimulus in zip(axes, stimuli):
+        analysis = binary_results[stimulus]
+        values = np.asarray(getattr(analysis, metric), dtype=float)
+        finite = np.isfinite(values)
+        vals = values[finite]
+        median = np.nanmedian(vals) if vals.size else np.nan
 
-    return fig, axes
-
-
-def plot_robust_mi_histograms(results: dict, denom_threshold: float = 1e-3):
-    """Plot the robust MI histogram for each stimulus in ``results``.
-
-    Robust cells satisfy ``|R_run + R_still| > denom_threshold``
-    (see :func:`get_robust_mi`); this is a filter, not a normalization.
-
-    Returns
-    -------
-    fig : matplotlib.figure.Figure
-    axes : np.ndarray of matplotlib.axes.Axes
-    """
-    n = len(results)
-    fig, axes = plt.subplots(1, n, figsize=(4 * n, 4), sharey=True)
-    axes = np.atleast_1d(axes)
-
-    for ax, stimulus in zip(axes, results):
-        mi, robust = get_robust_mi(results[stimulus], denom_threshold)
-        mi_robust = mi[robust]
-        median_mi = np.nanmedian(mi_robust)
-
-        ax.hist(mi_robust, bins=20, alpha=0.8)
-        ax.axvline(median_mi, linestyle="--", color="black", label=f"median={median_mi:.3f}")
-        ax.axvline(0, linestyle=":", color="gray")
-
-        ax.set_xlim(-1, 1)
-        ax.set_title(stimulus)
-        ax.set_xlabel("Robust MI")
-        ax.legend(frameon=False)
+        panel.hist(vals, bins=bins, range=value_range, alpha=0.8, color="C0")
+        panel.axvline(median, linestyle="--", color="black", label=f"median = {median:+.3f}")
+        panel.axvline(0, linestyle=":", color="gray", label="no modulation")
+        if value_range is not None:
+            panel.set_xlim(*value_range)
+        panel.set_title(f"{stimulus}\nn = {int(finite.sum())} cells")
+        panel.set_xlabel(metric)
+        panel.legend(frameon=False, fontsize=8)
 
     axes[0].set_ylabel("Number of cells")
     return fig, axes
-
-
-def plot_population_response_scatter(results: dict):
-    """Scatter running- vs. still-trial population responses per stimulus.
-
-    One point is one neuron; x = mean still-trial response, y = mean
-    running-trial response. This plot is descriptive, not a significance
-    test on its own.
-
-    Returns
-    -------
-    fig : matplotlib.figure.Figure
-    axes : np.ndarray of matplotlib.axes.Axes
-    """
-    n = len(results)
-    fig, axes = plt.subplots(1, n, figsize=(4.5 * n, 4), constrained_layout=True)
-    axes = np.atleast_1d(axes)
-
-    for ax, stimulus in zip(axes, results):
-        results[stimulus].plot_scatter(cell=None, ax=ax)
-
-    return fig, axes
-
-
-def plot_condition_gain_example(analysis: BinaryModulation, cell: int, ax=None):
-    """Plot the condition-level gain fit for one representative cell.
-
-    Thin wrapper around :meth:`BinaryModulation.plot_scatter`.
-
-    Returns
-    -------
-    fig : matplotlib.figure.Figure
-    """
-    return analysis.plot_scatter(cell=cell, ax=ax)
 
 
 def plot_grating_natural_paired_scatter(grating_values, natural_values, p_value=None, ax=None):
@@ -1649,6 +1455,13 @@ def plot_grating_natural_paired_scatter(grating_values, natural_values, p_value=
     else:
         fig = ax.figure
 
+    if grating_values.size == 0 or natural_values.size == 0:
+        ax.text(0.5, 0.5, "No valid paired cells", ha="center", va="center", transform=ax.transAxes)
+        ax.set_xlabel("Gratings MI: mean(DG, SG)")
+        ax.set_ylabel("Natural scenes MI")
+        ax.set_title("Gratings vs natural scenes\nn=0")
+        return fig, ax
+
     ax.scatter(grating_values, natural_values, alpha=0.75)
 
     lower = min(np.min(grating_values), np.min(natural_values))
@@ -1672,65 +1485,20 @@ def plot_grating_natural_paired_scatter(grating_values, natural_values, p_value=
     return fig, ax
 
 
-def plot_grating_natural_paired_distribution(grating_values, natural_values, p_value=None, ax=None):
-    """Paired boxplot + per-cell connecting lines for grating vs. NS MI.
-
-    Parameters
-    ----------
-    grating_values, natural_values : array-like
-        Matched-cell MI values, e.g. from :func:`compare_gratings_vs_natural`.
-    p_value : float, optional
-        Wilcoxon p-value to annotate in the title.
-    ax : matplotlib.axes.Axes, optional
-
-    Returns
-    -------
-    fig : matplotlib.figure.Figure
-    ax : matplotlib.axes.Axes
-    """
-    grating_values = np.asarray(grating_values, dtype=float)
-    natural_values = np.asarray(natural_values, dtype=float)
-
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(5, 4))
-    else:
-        fig = ax.figure
-
-    ax.boxplot(
-        [grating_values, natural_values],
-        tick_labels=["Gratings\nmean(DG, SG)", "Natural\nscenes"],
-        showfliers=False,
-    )
-
-    for g, n in zip(grating_values, natural_values):
-        ax.plot([1, 2], [g, n], color="gray", alpha=0.25, linewidth=0.8)
-
-    ax.axhline(0, linestyle=":", color="gray")
-    ax.set_ylabel("Robust MI")
-    title = "Paired MI comparison"
-    if p_value is not None:
-        title += f"\nWilcoxon p={p_value:.3g}"
-    ax.set_title(title)
-
-    return fig, ax
-
-
-def plot_metadata_validation(aligned: dict, validation_df: pd.DataFrame = None, ylabel: str = "Robust MI (ours)"):
+def plot_metadata_validation(aligned: dict, validation_df: pd.DataFrame = None, ylabel: str = "Sign-safe MI (ours)"):
     """Scatter our MI against Allen ``run_mod_*`` metadata, per stimulus.
 
     Parameters
     ----------
     aligned : dict
         Mapping stimulus -> {"mi": array, "ref": array}, as returned by
-        :func:`validate_mi_against_metadata` or
-        :func:`validate_signsafe_mi_against_metadata`.
+        :func:`validate_mi_against_metadata`.
     validation_df : pandas.DataFrame, optional
         Table with ``stimulus``, ``spearman_rho``, ``p_value``, ``n_cells``
         columns, used to annotate each panel's title.
     ylabel : str, optional
-        Y-axis label, so the panel can name whichever MI variant was passed
-        in ``aligned``. Defaults to ``"Robust MI (ours)"`` for backwards
-        compatibility.
+        Y-axis label naming the MI variant passed in ``aligned``. Defaults to
+        ``"Sign-safe MI (ours)"``.
 
     Returns
     -------
@@ -1836,375 +1604,3 @@ class EncodingModel:
         per model (Add / Mult / Full), possibly split by stimulus type.
         """
         raise NotImplementedError
-
-
-# ==============================================================================
-# Exploratory diagnostics — negative-response traces
-# ==============================================================================
-#
-# These helpers are exploratory only. They do not modify the MI definition,
-# do not correct or exclude any cell, and PCA here is a pattern-detection
-# tool, not a classifier of biological inhibition.
-
-
-def get_negative_response_cells(results: dict, denom_threshold: float = 0.0) -> pd.DataFrame:
-    """Flag cells whose MI denominator is negative or whose MI sign disagrees with :math:`\\Delta R`.
-
-    For every stimulus and cell this reports the raw quantities behind MI
-    so that sign-ambiguous or out-of-range cells can be inspected directly,
-    without altering :meth:`BinaryModulation.compute_mi`.
-
-    Parameters
-    ----------
-    results : dict
-        Mapping stimulus -> :class:`BinaryModulation` (already has
-        :meth:`compute_mi` run).
-    denom_threshold : float, optional
-        A cell's ``negative_denominator`` flag is
-        ``(r_run + r_still) < denom_threshold``, by default ``0.0``.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Columns: stimulus, cell, r_run, r_still, denominator, delta_r, mi,
-        negative_denominator, sign_reversal, abs_mi_gt_1.
-    """
-    rows = []
-    for stimulus, analysis in results.items():
-        r_run = np.asarray(analysis.r_run, dtype=float)
-        r_still = np.asarray(analysis.r_still, dtype=float)
-        mi = np.asarray(analysis.mi, dtype=float)
-
-        denom = r_run + r_still
-        delta_r = r_run - r_still
-
-        finite = np.isfinite(mi) & np.isfinite(delta_r)
-        sign_reversal = np.zeros(len(mi), dtype=bool)
-        sign_reversal[finite] = np.sign(mi[finite]) != np.sign(delta_r[finite])
-
-        negative_denominator = denom < denom_threshold
-        abs_mi_gt_1 = np.abs(mi) > 1
-
-        for cell in range(len(mi)):
-            rows.append({
-                "stimulus": stimulus,
-                "cell": cell,
-                "r_run": float(r_run[cell]),
-                "r_still": float(r_still[cell]),
-                "denominator": float(denom[cell]),
-                "delta_r": float(delta_r[cell]),
-                "mi": float(mi[cell]),
-                "negative_denominator": bool(negative_denominator[cell]),
-                "sign_reversal": bool(sign_reversal[cell]),
-                "abs_mi_gt_1": bool(abs_mi_gt_1[cell]),
-            })
-
-    return pd.DataFrame(rows)
-
-
-def extract_negative_trial_traces(
-    analysis: BinaryModulation,
-    cell_indices,
-    include_states=("running", "still"),
-) -> pd.DataFrame:
-    """Return individual (un-averaged) trial response traces for selected cells.
-
-    Parameters
-    ----------
-    analysis : BinaryModulation
-        Analysis with :meth:`classify_trials` already run.
-    cell_indices : iterable of int
-        Cells to extract traces for.
-    include_states : tuple of str, optional
-        Which trial states to include, from ``{"running", "still"}``,
-        by default both.
-
-    Returns
-    -------
-    pandas.DataFrame
-        One row per (cell, trial) pair, columns: cell, trial, state, trace
-        (1-D array over the response window, not averaged), condition
-        (stimulus condition label, or ``None`` for spontaneous activity).
-    """
-    responses = np.asarray(analysis._td.responses)  # (n_cells, n_trials, duration)
-    state_masks = {
-        "running": analysis.run_mask,
-        "still": analysis.still_mask,
-    }
-    labels = analysis.get_condition_labels()
-
-    rows = []
-    for cell in cell_indices:
-        for state in include_states:
-            mask = state_masks[state]
-            for trial in np.where(mask)[0]:
-                rows.append({
-                    "cell": int(cell),
-                    "trial": int(trial),
-                    "state": state,
-                    "trace": responses[cell, trial, :].copy(),
-                    "condition": labels[trial] if labels is not None else None,
-                })
-
-    return pd.DataFrame(rows)
-
-
-def run_negative_trace_pca(
-    traces: pd.DataFrame,
-    n_components: int = 3,
-    center_each_trace: bool = False,
-    scale_features: bool = True,
-):
-    """Exploratory PCA over trial-level response traces.
-
-    Rows are individual trial traces, columns are time points. This is a
-    pattern-detection tool only — it cannot establish that a negative
-    deflection reflects biological inhibition.
-
-    Parameters
-    ----------
-    traces : pandas.DataFrame
-        Output of :func:`extract_negative_trial_traces` (must have a
-        ``"trace"`` column of equal-length 1-D arrays).
-    n_components : int, optional
-        Number of principal components to keep, by default 3.
-    center_each_trace : bool, optional
-        If True, subtract each trace's own mean before PCA. Off by default,
-        because that would remove sustained negative offsets.
-    scale_features : bool, optional
-        If True (default), standardize each time-point column (feature)
-        to zero mean / unit variance across trials before PCA.
-
-    Returns
-    -------
-    scores : np.ndarray, shape (n_kept, n_components)
-        PCA scores for the retained (finite) traces.
-    components : np.ndarray, shape (n_components, n_timepoints)
-        Principal-component temporal loadings.
-    explained_variance_ratio : np.ndarray, shape (n_components,)
-    metadata : pandas.DataFrame
-        Rows of ``traces`` corresponding to ``scores`` (non-finite traces
-        dropped), with the same index alignment as ``scores``.
-    """
-    trace_matrix = np.vstack(traces["trace"].to_numpy())  # (n_traces, n_timepoints)
-
-    finite_rows = np.all(np.isfinite(trace_matrix), axis=1)
-    trace_matrix = trace_matrix[finite_rows]
-    metadata = traces.loc[finite_rows].reset_index(drop=True)
-
-    x = trace_matrix.copy()
-    if center_each_trace:
-        x = x - x.mean(axis=1, keepdims=True)
-
-    if scale_features:
-        x = StandardScaler().fit_transform(x)
-
-    n_components = min(n_components, x.shape[0], x.shape[1])
-    pca = PCA(n_components=n_components)
-    scores = pca.fit_transform(x)
-
-    return scores, pca.components_, pca.explained_variance_ratio_, metadata
-
-
-# ------------- plotting -------------
-
-
-def plot_negative_trace_examples(traces: pd.DataFrame, cell: int, n_examples: int = 6, ax=None):
-    """Plot example running/still trial traces plus mean +/- std band, for one cell.
-
-    Parameters
-    ----------
-    traces : pandas.DataFrame
-        Output of :func:`extract_negative_trial_traces`.
-    cell : int
-        Cell to plot.
-    n_examples : int, optional
-        Number of individual raw traces to overlay per state, by default 6.
-    ax : matplotlib.axes.Axes, optional
-
-    Returns
-    -------
-    fig : matplotlib.figure.Figure
-    ax : matplotlib.axes.Axes
-    """
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(6, 3.5))
-    else:
-        fig = ax.figure
-
-    cell_df = traces[traces["cell"] == cell]
-    state_colors = {"running": "C1", "still": "C0"}
-    rng = np.random.default_rng(0)
-
-    for state in cell_df["state"].unique():
-        state_df = cell_df[cell_df["state"] == state]
-        trace_matrix = np.vstack(state_df["trace"].to_numpy())
-        t = np.arange(trace_matrix.shape[1])
-        color = state_colors.get(state, "gray")
-
-        n_show = min(n_examples, trace_matrix.shape[0])
-        idx = rng.choice(trace_matrix.shape[0], size=n_show, replace=False)
-        for i in idx:
-            ax.plot(t, trace_matrix[i], color=color, alpha=0.25, linewidth=0.8)
-
-        mean_trace = np.nanmean(trace_matrix, axis=0)
-        std_trace = np.nanstd(trace_matrix, axis=0)
-        ax.plot(t, mean_trace, color=color, linewidth=2.5, label=f"{state} mean (n={trace_matrix.shape[0]})")
-        ax.fill_between(t, mean_trace - std_trace, mean_trace + std_trace, color=color, alpha=0.2)
-
-    ax.axhline(0, linestyle=":", color="black", linewidth=0.8)
-    ax.set_xlabel("Frame within response window")
-    ax.set_ylabel("ΔF/F")
-    ax.set_title(f"Cell {cell}")
-    ax.legend(frameon=False, fontsize=8)
-
-    return fig, ax
-
-
-def plot_negative_trace_heatmap(traces: pd.DataFrame, pca_scores=None, ax=None):
-    """Heatmap of trial traces, ordered by cell, state, and optionally PCA score.
-
-    Parameters
-    ----------
-    traces : pandas.DataFrame
-        Output of :func:`extract_negative_trial_traces` (or the ``metadata``
-        returned by :func:`run_negative_trace_pca`, if rows were dropped).
-    pca_scores : np.ndarray, optional
-        PC scores aligned row-for-row with ``traces``; if given, traces are
-        additionally sorted by PC1 within each (cell, state) group.
-    ax : matplotlib.axes.Axes, optional
-
-    Returns
-    -------
-    fig : matplotlib.figure.Figure
-    ax : matplotlib.axes.Axes
-    """
-    df = traces.reset_index(drop=True).copy()
-    sort_cols = ["cell", "state"]
-    if pca_scores is not None:
-        df["_pc1"] = np.asarray(pca_scores)[:, 0]
-        sort_cols = sort_cols + ["_pc1"]
-
-    order = df.sort_values(sort_cols).index.to_numpy()
-    sorted_df = df.loc[order].reset_index(drop=True)
-    matrix = np.vstack(sorted_df["trace"].to_numpy())
-
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(6, max(2, 0.15 * len(order))))
-    else:
-        fig = ax.figure
-
-    vmax = np.nanpercentile(np.abs(matrix), 95)
-    vmax = vmax if vmax > 0 else 1.0
-    im = ax.imshow(matrix, aspect="auto", cmap="coolwarm", vmin=-vmax, vmax=vmax)
-    fig.colorbar(im, ax=ax, label="ΔF/F")
-    ax.set_xlabel("Frame within response window")
-    ax.set_ylabel("Trial")
-
-    # Separators + group labels for each (cell, state) block. Groups are
-    # contiguous because sorted_df is sorted by (cell, state[, PC1]).
-    group_sizes = sorted_df.groupby(["cell", "state"], sort=False).size()
-    yticks, yticklabels = [], []
-    boundary = 0
-    for (cell, state), size in group_sizes.items():
-        yticks.append(boundary + size / 2 - 0.5)
-        yticklabels.append(f"cell {cell}\n({state})")
-        boundary += size
-        if boundary < len(sorted_df):
-            ax.axhline(boundary - 0.5, color="black", linewidth=0.6, alpha=0.6)
-    ax.set_yticks(yticks)
-    ax.set_yticklabels(yticklabels, fontsize=7)
-
-    pc1_note = " — rows ordered by PC1 score within each cell/state group" if pca_scores is not None else ""
-    ax.set_title(f"Trial traces, grouped by cell and state{pc1_note}", fontsize=9)
-
-    return fig, ax
-
-
-def plot_negative_trace_pca_scores(scores, metadata: pd.DataFrame, pc_x: int = 0, pc_y: int = 1, ax=None):
-    """Scatter PCA scores, colored by behavioral state, one marker shape per cell.
-
-    Parameters
-    ----------
-    scores : np.ndarray, shape (n_traces, n_components)
-        From :func:`run_negative_trace_pca`.
-    metadata : pandas.DataFrame
-        Aligned metadata from :func:`run_negative_trace_pca`, with ``cell``
-        and ``state`` columns.
-    pc_x, pc_y : int, optional
-        Zero-based component indices to plot, by default (0, 1) i.e. PC1/PC2.
-    ax : matplotlib.axes.Axes, optional
-
-    Returns
-    -------
-    fig : matplotlib.figure.Figure
-    ax : matplotlib.axes.Axes
-    """
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(5, 5))
-    else:
-        fig = ax.figure
-
-    state_colors = {"running": "C1", "still": "C0"}
-    markers = ["o", "s", "^", "D", "P", "X", "v"]
-    cells = sorted(metadata["cell"].unique())
-    marker_map = {c: markers[i % len(markers)] for i, c in enumerate(cells)}
-
-    for cell in cells:
-        for state, color in state_colors.items():
-            m = ((metadata["cell"] == cell) & (metadata["state"] == state)).to_numpy()
-            if not m.any():
-                continue
-            ax.scatter(
-                scores[m, pc_x],
-                scores[m, pc_y],
-                color=color,
-                marker=marker_map[cell],
-                alpha=0.7,
-                label=f"cell {cell} ({state})",
-            )
-
-    ax.axhline(0, linestyle=":", color="gray", linewidth=0.8)
-    ax.axvline(0, linestyle=":", color="gray", linewidth=0.8)
-    ax.set_xlabel(f"PC{pc_x + 1}")
-    ax.set_ylabel(f"PC{pc_y + 1}")
-    ax.legend(frameon=False, fontsize=7, ncol=2)
-
-    return fig, ax
-
-
-def plot_negative_trace_pcs(components, explained_variance_ratio, n_show: int = 3, ax=None):
-    """Plot the temporal loadings of the first ``n_show`` principal components.
-
-    Parameters
-    ----------
-    components : np.ndarray, shape (n_components, n_timepoints)
-        From :func:`run_negative_trace_pca`.
-    explained_variance_ratio : np.ndarray, shape (n_components,)
-        From :func:`run_negative_trace_pca`.
-    n_show : int, optional
-        Number of leading components to plot, by default 3.
-    ax : matplotlib.axes.Axes, optional
-
-    Returns
-    -------
-    fig : matplotlib.figure.Figure
-    ax : matplotlib.axes.Axes
-    """
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(6, 3.5))
-    else:
-        fig = ax.figure
-
-    n_show = min(n_show, components.shape[0])
-    t = np.arange(components.shape[1])
-    for i in range(n_show):
-        ax.plot(t, components[i], label=f"PC{i + 1} ({100 * explained_variance_ratio[i]:.1f}% var)")
-
-    ax.axhline(0, linestyle=":", color="gray", linewidth=0.8)
-    ax.set_xlabel("Frame within response window")
-    ax.set_ylabel("Loading")
-    ax.set_title("Principal-component temporal loadings")
-    ax.legend(frameon=False)
-
-    return fig, ax
