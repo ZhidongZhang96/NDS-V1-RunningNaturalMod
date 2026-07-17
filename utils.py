@@ -167,7 +167,7 @@ class TrialData:
 def extract_trials(
     data,
     stimulus: str,
-    response_window: tuple = (0, 60),
+    response_window: tuple | None = None,
 ) -> TrialData:
     """Extract responses and running speed for a given stimulus (from all sessions).
 
