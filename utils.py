@@ -132,9 +132,10 @@ def get_condition_intervals(epoch_table: pd.DataFrame, conditions=None) -> dict:
 def _plot_mean_sem(ax, x, data, color, alpha=0.5, label=None,
                    linestyle='-', marker_facecolor='black',
                    marker_edgecolor='black'):
-    """Plot mean ± SEM as fill_between + line with markers."""
-    m = data.mean(axis=0)
-    s = data.std(axis=0) / np.sqrt(data.shape[0])
+    """Plot mean ± SEM as fill_between + line with markers (NaN-safe)."""
+    m = np.nanmean(data, axis=0)
+    n_valid = np.sum(~np.isnan(data), axis=0)
+    s = np.nanstd(data, axis=0, ddof=0) / np.sqrt(n_valid)
     ax.fill_between(x, m - s, m + s, color=color, alpha=alpha,
                     edgecolor='none', label=label)
     ax.plot(x, m, color=color, marker='o', markersize=3,
@@ -198,7 +199,6 @@ def extract_trials(
         - ``offset``: frames to skip at the beginning of each trial.
         - ``duration``: frames to include; ``None`` means use the full trial
           length (minus offset).
-
 
     Returns
     -------
@@ -311,26 +311,31 @@ def _get_condition_labels(td: TrialData):
     return labels
 
 
-def find_preferred_conditions(td: TrialData):
-    """Find each neuron's preferred stimulus condition.
+def find_preferred_conditions(td: TrialData, top_frac: float = 0.5):
+    """Find each neuron's preferred stimulus condition(s).
 
     Groups trials by visual condition, computes the mean response per
     condition (averaged over all trials regardless of running speed), and
-    identifies which condition evokes the largest mean response for each
-    neuron.
+    identifies which conditions are the most responsive for each neuron.
 
     Parameters
     ----------
     td : TrialData
+    top_frac : float
+        Fraction of top conditions (by mean response) to consider as
+        "preferred" for each neuron.  ``0.5`` = the top half, ``1.0``
+        = all conditions, ``0`` = none.  Default ``0.5``.
 
     Returns
     -------
-    preferred_labels : np.ndarray or None
-        Shape ``(n_cells,)`` — the condition label (tuple or scalar) with
-        max mean response. None for spontaneous.
+    preferred_labels : list of tuple or None
+        Length ``(n_cells,)`` — each element is a tuple of condition
+        labels whose mean response is in the top *top_frac*.
+        Empty tuple for neurons with no responsive condition.  None for
+        spontaneous.
     preferred_trial_mask : np.ndarray or None
-        Shape ``(n_cells, n_trials)`` bool — which trials belong to the
-        preferred condition. None for spontaneous.
+        Shape ``(n_cells, n_trials)`` bool — ``True`` for trials belonging
+        to any preferred condition of that neuron.  None for spontaneous.
     condition_mean_responses : np.ndarray or None
         Shape ``(n_cells, n_conditions)`` — mean ΔF/F per condition.
         None for spontaneous.
@@ -343,27 +348,29 @@ def find_preferred_conditions(td: TrialData):
     trial_mean = responses.mean(axis=-1)         # (n_cells, n_trials)
 
     unique_conditions = pd.unique(labels)
-    n_cells = responses.shape[0]
+    n_cells = N_CELLS
     n_conditions = len(unique_conditions)
+    n_top = max(1, int(round(n_conditions * top_frac)))  # at least 1
 
-    condition_mean_responses = np.full((n_cells, n_conditions), np.nan)
     condition_masks = []  # one bool mask per condition
-
     for cond in unique_conditions:
         mask = np.array([label == cond for label in labels], dtype=bool)
         condition_masks.append(mask)
 
+    condition_mean_responses = np.full((n_cells, n_conditions), np.nan)
     for idx in range(n_conditions):
         condition_mean_responses[:, idx] = trial_mean[:, condition_masks[idx]].mean(axis=1)
 
-    # preferred condition = max mean response per neuron
-    best_idx = np.nanargmax(condition_mean_responses, axis=1)  # (n_cells,)
-    preferred_labels = np.array([unique_conditions[i] for i in best_idx])
+    # top-k conditions per neuron
+    top_indices = np.argsort(-condition_mean_responses, axis=1)[:, :n_top]  # (n_cells, n_top)
 
-    # build per-neuron trial mask
+    preferred_labels = []
     preferred_trial_mask = np.zeros((n_cells, len(labels)), dtype=bool)
     for i in range(n_cells):
-        preferred_trial_mask[i] = condition_masks[best_idx[i]]
+        conds = tuple(unique_conditions[idx] for idx in top_indices[i])
+        preferred_labels.append(conds)
+        for idx in top_indices[i]:
+            preferred_trial_mask[i] |= condition_masks[idx]
 
     return preferred_labels, preferred_trial_mask, condition_mean_responses
 
@@ -584,6 +591,7 @@ class Plotter:
 POS_COLOR = "#E7402D"                        # positive  (red)
 NEG_COLOR = "#2492DC"                        # negative  (blue)
 NM_COLOR  = "#71AD77"                        # non-monotonic (teal)
+NTM_COLOR = "#B0A0A0"                        # non-tuned modulated (warm gray)
 OTHER_COLOR = '#7f7f7f'                      # "Others" in condition plots
 
 
@@ -628,43 +636,49 @@ class SpeedTuning:
     n_bins : int, optional
         Number of speed bins, by default 20.
     neuron_mask : np.ndarray or None, optional
-        Boolean mask ``(n_cells,)`` — only these neurons are analysed.
+        Boolean mask ``(n_cells_picked,)`` — only these neurons are analysed.
         Typically from :attr:`BinaryModulation.tuned_mask`. None = all neurons.
-    trial_mask : np.ndarray or None, optional
-        Boolean mask ``(n_cells, n_trials)`` — per-neuron trial selection
-        (e.g. preferred-condition trials from :func:`find_preferred_conditions`).
+    pref_trial_mask : np.ndarray or None, optional
+        Boolean mask ``(n_cells_picked, n_trials_pref)`` — per-neuron trial selection
+        (preferred-condition trials from :func:`find_preferred_conditions`).
         Trials where the mask is False are set to NaN. None = all trials.
+    still_trial_mask : np.ndarray or None, optional
+        Boolean mask ``(n_trials,)`` — True = still trial to exclude from analysis.
+        Applied before neuron_mask and pref_trial_mask. None = keep all trials.
     """
 
     def __init__(self, trial_data: TrialData | dict[str, TrialData],
                  mode='equal_size', n_bins: int = 20,
-                 neuron_mask=None, trial_mask=None):
+                 neuron_mask=None, pref_trial_mask=None,
+                 still_trial_mask=None):
         self._td = trial_data
         self.n_bins = n_bins
         self.mode = mode
-        self.neuron_mask = neuron_mask
-        self.trial_mask = trial_mask
+        self.neuron_mask = neuron_mask  # if None, n_cells_picked = n_cells
+        self.pref_trial_mask = pref_trial_mask  # if None, n_trials_pref = n_trials_total
+        self.still_trial_mask = still_trial_mask  # if None, keep all trials
 
         # by compute_tuning()
-        self.responses: np.ndarray | None = None             # shape (n_cells, n_trials_total)
-        self.speeds: np.ndarray | None = None                # shape (n_trials_total,)
+        self.responses: np.ndarray | None = None             # (n_cells_picked, n_trials_pref), neuron-masked only
+        self.masked_responses: np.ndarray | None = None      # (n_cells_picked, n_trials_pref), trial-masked (NaN'd)
+        self.speeds: np.ndarray | None = None                # (n_trials_pref,)
 
-        self.bins_edges: np.ndarray | None = None            # shape (n_bins+1,)
-        self.bins_centers: np.ndarray | None = None          # shape (n_bins,)
-        self.bins_ids: np.ndarray | None = None              # shape (n_trials_total,) starts from `1`
-        self.bins_sub_ids: np.ndarray | None = None          # shape (n_trials_total,) with ignored ones `-1`
+        self.bins_edges: np.ndarray | None = None            # (n_bins+1,)
+        self.bins_centers: np.ndarray | None = None          # (n_bins,)
+        self.bins_ids: np.ndarray | None = None              # (n_trials_pref,) starts from `1`
+        self.bins_sub_ids: np.ndarray | None = None          # (n_trials_pref,) with ignored ones `-1`
 
-        self.mean_all_responses: np.ndarray | None = None    # shape (n_cells, n_bins)
-        self.mean_responses: np.ndarray | None = None        # shape (n_bins,)
-        self.std_responses: np.ndarray | None = None         # shape (n_bins,)
+        self.mean_all_responses: np.ndarray | None = None    # (n_cells_picked, n_bins)
+        self.mean_responses: np.ndarray | None = None        # (n_bins,)
+        self.std_responses: np.ndarray | None = None         # (n_bins,)
 
         # by significance_test()
-        self.levene_p_values: np.ndarray | None = None       # shape (n_cells,)
-        self.significant_mask: np.ndarray | None = None      # bool, shape (n_cells,)
+        self.levene_p_values: np.ndarray | None = None       # (n_cells_picked,)
+        self.significant_mask: np.ndarray | None = None      # bool, (n_cells_picked,)
 
         # by compute_spearman()
-        self.rho: np.ndarray | None = None                   # shape (n_cells,)
-        self.rho_p_values: np.ndarray | None = None          # shape (n_cells,)
+        self.rho: np.ndarray | None = None                   # (n_cells_picked,)
+        self.rho_p_values: np.ndarray | None = None          # (n_cells_picked,)
         self.monotonic_mask : dict[str, np.ndarray] | None = None
         
 
@@ -678,9 +692,9 @@ class SpeedTuning:
 
         Returns
         -------
-        responses : np.ndarray, shape ``(n_cells, n_trials_total)``
+        responses : np.ndarray, shape ``(n_cells_picked, n_trials_pref)``
             Mean ΔF/F per trial (averaged over the response window).
-        speed : np.ndarray, shape ``(n_trials_total,)``
+        speed : np.ndarray, shape ``(n_trials_pref,)``
             Mean running speed per trial (averaged over the trial window).
         """
         if isinstance(self._td, TrialData):
@@ -697,18 +711,18 @@ class SpeedTuning:
         Parameters
         ----------
         bins_ids : np.ndarray or None
-            Bin assignments for each trial, shape ``(n_trials,)``.
+            Bin assignments for each trial, shape ``(n_trials_pref,)``.
             Uses ``self.bins_ids`` if None.
         mode : str, optional
             The way to bin the data
         Returns
         -------
         bins_edges : np.ndarray, shape ``(n_bins+1,)``
-        bins_ids : np.ndarray, shape ``(n_trials,)``
-        mean_all_responses : np.ndarray, shape ``(n_cells, n_bins)``
+        bins_ids : np.ndarray, shape ``(n_trials_pref,)``
+        mean_all_responses : np.ndarray, shape ``(n_cells_picked, n_bins)``
         """
         assert self.speeds is not None, "call compute_tuning() first"
-        assert self.responses is not None, "call compute_tuning() first"
+        assert self.masked_responses is not None, "call compute_tuning() first"
 
         # bin the speed
         if self.bins_edges is None:
@@ -737,11 +751,11 @@ class SpeedTuning:
         for b in range(1, self.n_bins + 1):
             mask = bins_ids == b
             if not np.any(mask):
-                mean_all_responses.append(np.full(self.responses.shape[0], np.nan))
+                mean_all_responses.append(np.full(self.masked_responses.shape[0], np.nan))
                 continue
-            res_bin = self.responses[:, mask]   # (n_cells, n_trials_in_bin)
+            res_bin = self.masked_responses[:, mask]   # (n_cells_picked, n_trials_in_bin)
             mean_all_responses.append(np.nanmean(res_bin, axis=1))
-        mean_all_responses = np.array(mean_all_responses).T  # (n_cells, n_bins)
+        mean_all_responses = np.array(mean_all_responses).T  # (n_cells_picked, n_bins)
 
         return bins_edges, bins_ids, mean_all_responses
 
@@ -751,7 +765,7 @@ class SpeedTuning:
         Marks dropped trials by setting their bin id to -1 in ``self.bins_sub_ids``.
         """
         assert self.bins_ids is not None
-        bins_ids = self.bins_ids.copy()  # (n_trials_total,)
+        bins_ids = self.bins_ids.copy()  # (n_trials_pref,)
 
         ids, counts = np.unique(bins_ids, return_counts=True)
         if max_per_bin is None:
@@ -773,6 +787,52 @@ class SpeedTuning:
         self.bins_sub_ids = bins_ids
 
 
+    # ------------- mask application -------------
+
+    def _apply_masks(self, responses, speeds):
+        """Apply still_trial_mask, neuron_mask, and pref_trial_mask in order.
+
+        Parameters
+        ----------
+        responses : np.ndarray, shape ``(n_cells, n_trials)``
+            Raw mean ΔF/F per trial from :meth:`_pooled`.
+        speeds : np.ndarray, shape ``(n_trials,)``
+            Raw mean running speed per trial from :meth:`_pooled`.
+
+        Returns
+        -------
+        responses : np.ndarray, shape ``(n_cells_picked, n_trials_pref)``
+            Neuron-masked responses.
+        speeds : np.ndarray, shape ``(n_trials_pref,)``
+            Still-filtered speeds (aligned to neuron-masked responses).
+        masked_responses : np.ndarray, shape ``(n_cells_picked, n_trials_pref)``
+            Trial-masked responses (NaN where ``pref_trial_mask`` is False).
+        """
+        # apply still_trial_mask — exclude still (non-running) trials
+        still_keep = ~self.still_trial_mask if self.still_trial_mask is not None else None
+        if still_keep is not None:
+            responses = responses[:, still_keep]
+            speeds = speeds[still_keep]
+
+        # apply neuron_mask
+        if self.neuron_mask is not None:
+            responses = responses[self.neuron_mask]
+
+        # apply pref_trial_mask (NaN-masked per-neuron trial selection)
+        if self.pref_trial_mask is not None:
+            mask = self.pref_trial_mask
+            if still_keep is not None:
+                mask = mask[:, still_keep]
+            if self.neuron_mask is not None:
+                mask = mask[self.neuron_mask]
+            masked_responses = responses.copy()
+            masked_responses[~mask] = np.nan
+        else:
+            masked_responses = responses
+
+        return responses, speeds, masked_responses
+
+
     # ------------- core computation -------------
     
     def run(self):
@@ -784,19 +844,9 @@ class SpeedTuning:
     def compute_tuning(self):
         """Bin trials by running speed and compute tuning curves.
         """
-        self.responses, self.speeds = self._pooled()
-
-        # apply neuron_mask
-        if self.neuron_mask is not None:
-            self.responses = self.responses[self.neuron_mask]
-
-        # apply trial_mask (NaN-masked per-neuron trial selection)
-        if self.trial_mask is not None:
-            mask = self.trial_mask
-            if self.neuron_mask is not None:
-                mask = mask[self.neuron_mask]
-            self.responses = self.responses.copy()
-            self.responses[~mask] = np.nan
+        responses, speeds = self._pooled()
+        self.responses, self.speeds, self.masked_responses = \
+            self._apply_masks(responses, speeds)
 
         self.bins_edges, self.bins_ids, self.mean_all_responses = \
             self._binned_responses()
@@ -832,8 +882,8 @@ class SpeedTuning:
 
         Stores
         ------
-        levene_p_values : np.ndarray, shape ``(n_cells,)``
-        significant_mask : np.ndarray of bool, shape ``(n_cells,)``
+        levene_p_values : np.ndarray, shape ``(n_cells_picked,)``
+        significant_mask : np.ndarray of bool, shape ``(n_cells_picked,)``
         """
         assert self.mean_all_responses is not None, "call compute_tuning() first"
         assert self.bins_sub_ids is not None, "call compute_tuning() first"
@@ -841,7 +891,7 @@ class SpeedTuning:
         rng = np.random.default_rng(seed)
 
         # the real tuning — variance across bins
-        vs_real = self.mean_all_responses.var(axis=1)   # (n_cells)
+        vs_real = np.nanvar(self.mean_all_responses, axis=1)   # (n_cells_picked)
 
         # shuffled — permute bin labels, re-compute variance
         vs_shuffled = []
@@ -851,11 +901,11 @@ class SpeedTuning:
             valid_mask = shuffled_bins_ids != -1
             valid_ids = shuffled_bins_ids[valid_mask]
             shuffled_bins_ids[valid_mask] = rng.permutation(valid_ids)
-            _, _, mean_all_res = self._binned_responses(bins_ids=shuffled_bins_ids) # (n_cells, n_bins)
-            vs_shuffled.append(mean_all_res.var(axis=1))
-        vs_shuffled = np.array(vs_shuffled).T   # (n_cells, n_shuffles)
+            _, _, mean_all_res = self._binned_responses(bins_ids=shuffled_bins_ids) # (n_cells_picked, n_bins)
+            vs_shuffled.append(np.nanvar(mean_all_res, axis=1))
+        vs_shuffled = np.array(vs_shuffled).T   # (n_cells_picked, n_shuffles)
 
-        p_values = np.mean(vs_shuffled >= vs_real[:, np.newaxis], axis=1)    # (n_cells)
+        p_values = np.mean(vs_shuffled >= vs_real[:, np.newaxis], axis=1)    # (n_cells_picked)
         significant_mask = p_values < threshold
 
         self.levene_p_values = p_values
@@ -868,29 +918,36 @@ class SpeedTuning:
 
         Stores
         ------
-        rho : np.ndarray, shape ``(n_cells,)``
-        rho_p_values : np.ndarray, shape ``(n_cells,)``
-        monotonic_mask : dict[str, np.array], with elements shape ``(n_cells,)``
+        rho : np.ndarray, shape ``(n_cells_picked,)``
+        rho_p_values : np.ndarray, shape ``(n_cells_picked,)``
+        monotonic_mask : dict[str, np.array], with elements shape ``(n_cells_picked,)``
         """
 
-        assert self.responses is not None, "call compute_tuning() first"
+        assert self.masked_responses is not None, "call compute_tuning() first"
         assert self.bins_sub_ids is not None, "call compute_tuning() first"
         assert self.significant_mask is not None, "call significance_test() first"
 
         from scipy.stats import spearmanr
-        seq_speed_ids = self.bins_sub_ids   # (n_trials_total)
-        seq_responses = self.responses  # (n_cells, n_trials_total)
+        seq_speed_ids = self.bins_sub_ids   # (n_trials_pref)
+        seq_responses = self.masked_responses  # (n_cells_picked, n_trials_pref)
 
         # drop excluded trials (-1) before Spearman correlation
         valid_mask = seq_speed_ids != -1
         seq_speed_ids = seq_speed_ids[valid_mask]
         seq_responses = seq_responses[:, valid_mask]
 
-        combined_mat = np.vstack([seq_speed_ids, seq_responses])    # (1+n_cells, n_valid_trials)
-        res = spearmanr(combined_mat, axis=1)
-
-        rho = res.statistic[0, 1:]          # (n_cells,)
-        rho_p_values = res.pvalue[0, 1:]    # (n_cells,)
+        # per-cell Spearman: handle NaN from pref_trial_mask
+        n_cells = seq_responses.shape[0]
+        rho = np.full(n_cells, np.nan)
+        rho_p_values = np.full(n_cells, np.nan)
+        for i in range(n_cells):
+            cell_valid = ~np.isnan(seq_responses[i])
+            n_valid = cell_valid.sum()
+            if n_valid <= 2:  # need >= 3 points for a meaningful correlation
+                continue
+            res = spearmanr(seq_speed_ids[cell_valid], seq_responses[i, cell_valid])
+            rho[i] = res.statistic
+            rho_p_values[i] = res.pvalue
 
         # categorize monotonicity: positive, negative, or non-monotonic but tuned
         masking = (rho_p_values < p_threshold) & (np.abs(rho) >= rho_threshold)
@@ -923,7 +980,7 @@ class SpeedTuning:
 
         Parameters
         ----------
-        responses : np.ndarray, shape (n_cells, n_bins)
+        responses : np.ndarray, shape (n_cells_picked, n_bins)
             Response values to average and plot.
         ylabel : str
             Y-axis label.
@@ -1005,26 +1062,30 @@ class SpeedTuning:
 
     def _plot_tuning_by_monotonicity(self, responses, ylabel, axes, figsize,
                                      cells=None, spont_responses=None,
-                                     mi=None):
-        """Shared core: plot 3-panel monotonicity figure from a response matrix.
+                                     mi=None, non_tuned_modulated_mask=None):
+        """Shared core: plot monotonicity figure from a response matrix.
 
         Parameters
         ----------
-        responses : np.ndarray, shape (n_cells, n_bins)
+        responses : np.ndarray, shape (n_cells_picked, n_bins)
             Response values to plot (raw mean or z-scored).
         ylabel : str
             Y-axis label for the leftmost subplot.
-        axes : array-like of 3 Axes or None
+        axes : array-like of 3 or 4 Axes or None
         figsize : tuple
         cells : list[int] or None, optional
             Subset of cells to plot. None = all cells.
         spont_responses : np.ndarray or None, optional
-            Spontaneous tuning responses of the same cells, shape (n_cells, n_bins).
+            Spontaneous tuning responses of the same cells, shape (n_cells_picked, n_bins).
             When provided, each subplot shows the spontaneous tuning of its category
             as a baseline (same type of color) instead of non-significant cells (gray).
         mi : np.ndarray or None, optional
-            Per-cell modulation index ``(n_cells,)``. When provided, the mean MI
+            Per-cell modulation index ``(n_cells_picked,)``. When provided, the mean MI
             of each category is shown in the subplot title.
+        non_tuned_modulated_mask : np.ndarray or None, optional
+            Boolean mask ``(n_cells_picked,)`` — cells that are running-modulated
+            (from BinaryModulation) but not significantly speed-tuned. When provided,
+            a 4th panel is drawn showing their average tuning curve.
 
         Returns
         -------
@@ -1044,6 +1105,8 @@ class SpeedTuning:
             masks = {k: self.monotonic_mask[k][cells_arr]
                      for k in ('positive', 'negative', 'non-monotonic')}
             _mi = mi[cells_arr] if mi is not None else None
+            if non_tuned_modulated_mask is not None:
+                non_tuned_modulated_mask = non_tuned_modulated_mask[cells_arr]
         else:
             bg = ~self.significant_mask
             rho = self.rho
@@ -1055,13 +1118,14 @@ class SpeedTuning:
             ('negative',      NEG_COLOR),
             ('non-monotonic', NM_COLOR),
         ]
+        n_cols = 4 if non_tuned_modulated_mask is not None else 3
 
         if axes is None:
-            fig, axes = plt.subplots(1, 3, figsize=figsize)
+            fig, axes = plt.subplots(1, n_cols, figsize=figsize)
         else:
             fig = axes.flat[0].figure if hasattr(axes, 'flat') else axes[0].figure
 
-        for ax, (key, color) in zip(axes, cats):
+        for ax, (key, color) in zip(axes[:3], cats):
             mask = masks[key]
             n = mask.sum()
             label = 'non-mono' if key == 'non-monotonic' else key
@@ -1098,6 +1162,23 @@ class SpeedTuning:
             ax.set_title(''.join(title_parts))
             ax.set_ylabel('')
 
+        # 4th panel: non-tuned modulated cells
+        if non_tuned_modulated_mask is not None and len(axes) > 3:
+            ax4 = axes[3]
+            nm_mask = non_tuned_modulated_mask
+            n = nm_mask.sum()
+
+            if spont_responses is not None and n > 0:
+                _plot_mean_sem(ax4, self.bins_centers, spont_responses[nm_mask],
+                               NTM_COLOR, alpha=0.15, linestyle='--',
+                               marker_facecolor='none')
+
+            if n > 0:
+                _plot_mean_sem(ax4, self.bins_centers, responses[nm_mask],
+                               NTM_COLOR, alpha=0.5)
+            ax4.set_title(f'non-tuned mod. (n={n})')
+            ax4.set_ylabel('')
+
         axes[0].set_ylabel(ylabel)
         fig.tight_layout(rect=(0, 0, 1, 0.94))
 
@@ -1119,21 +1200,27 @@ class SpeedTuning:
 
     def plot_tuning_by_monotonicity(self, axes=None, figsize=(10, 3.5),
                                     cells=None, spontaneous: 'SpeedTuning | None' = None,
-                                    mi: np.ndarray | None = None) -> plt.Figure:
-        """Subplots: tuning curves for positive / negative / non-monotonic cells separately.
+                                    mi: np.ndarray | None = None,
+                                    modulated_mask: np.ndarray | None = None) -> plt.Figure:
+        """Subplots: tuning curves for positive / negative / non-monotonic cells separately,
+        plus an optional 4th panel for non-tuned modulated cells.
 
         Parameters
         ----------
-        axes : array-like of 3 Axes or None, optional
+        axes : array-like of 3 or 4 Axes or None, optional
         figsize : tuple, optional
         cells : list[int] or None, optional
         spontaneous : SpeedTuning or None, optional
             A SpeedTuning instance for spontaneous activity. When provided, each
             subplot shows the spontaneous tuning of its category as a gray baseline.
         mi : np.ndarray or None, optional
-            Per-cell modulation index ``(n_cells,)`` from
+            Per-cell modulation index ``(n_cells_picked,)`` from
             :class:`BinaryModulation`. When provided, each subplot title
             includes the mean MI of that category.
+        modulated_mask : np.ndarray or None, optional
+            Boolean mask ``(n_cells_picked,)`` for running-modulated cells
+            (from :attr:`BinaryModulation.tuned_mask`). When provided, a 4th
+            panel shows the average tuning of modulated but non-tuned cells.
 
         Returns
         -------
@@ -1141,18 +1228,26 @@ class SpeedTuning:
         """
         assert self.mean_all_responses is not None, "call compute_tuning() first"
         spont_resps = spontaneous.mean_all_responses if spontaneous is not None else None
+
+        non_tuned_mod = None
+        if modulated_mask is not None:
+            non_tuned_mod = modulated_mask & ~self.significant_mask
+
         return self._plot_tuning_by_monotonicity(
             self.mean_all_responses, 'average $\\Delta$F/F', axes, figsize, cells,
-            spont_responses=spont_resps, mi=mi)
+            spont_responses=spont_resps, mi=mi,
+            non_tuned_modulated_mask=non_tuned_mod)
 
     def plot_tuning_by_monotonicity_zscore(self, axes=None, figsize=(10, 3.5),
                                            cells=None, spontaneous: 'SpeedTuning | None' = None,
-                                           mi: np.ndarray | None = None) -> plt.Figure:
-        """Subplots with per-cell z-scored tuning curves for each monotonicity category.
+                                           mi: np.ndarray | None = None,
+                                           modulated_mask: np.ndarray | None = None) -> plt.Figure:
+        """Subplots with per-cell z-scored tuning curves for each monotonicity category,
+        plus an optional 4th panel for non-tuned modulated cells.
 
         Parameters
         ----------
-        axes : array-like of 3 Axes or None, optional
+        axes : array-like of 3 or 4 Axes or None, optional
         figsize : tuple, optional
         cells : list[int] or None, optional
         spontaneous : SpeedTuning or None, optional
@@ -1160,9 +1255,13 @@ class SpeedTuning:
             subplot shows the spontaneous tuning of its category as a gray baseline
             (also z-scored).
         mi : np.ndarray or None, optional
-            Per-cell modulation index ``(n_cells,)`` from
+            Per-cell modulation index ``(n_cells_picked,)`` from
             :class:`BinaryModulation`. When provided, each subplot title
             includes the mean MI of that category.
+        modulated_mask : np.ndarray or None, optional
+            Boolean mask ``(n_cells_picked,)`` for running-modulated cells
+            (from :attr:`BinaryModulation.tuned_mask`). When provided, a 4th
+            panel shows the average tuning of modulated but non-tuned cells.
 
         Returns
         -------
@@ -1183,9 +1282,14 @@ class SpeedTuning:
         else:
             spont_z = None
 
+        non_tuned_mod = None
+        if modulated_mask is not None:
+            non_tuned_mod = modulated_mask & ~self.significant_mask
+
         return self._plot_tuning_by_monotonicity(
             responses_z, 'z-scored', axes, figsize, cells,
-            spont_responses=spont_z, mi=mi)
+            spont_responses=spont_z, mi=mi,
+            non_tuned_modulated_mask=non_tuned_mod)
 
 
 def plot_tuning_curves_grid(tunings: dict[str, SpeedTuning],
@@ -1255,10 +1359,15 @@ def plot_tuning_curves_grid(tunings: dict[str, SpeedTuning],
 
 def plot_monotonicity_stacked_bar(tunings: dict[str, SpeedTuning],
                                    ax: plt.Axes = None,
-                                   colors: dict[str, str]| None = None, 
+                                   colors: dict[str, str]| None = None,
+                                   modulated_mask: dict[str, np.ndarray] | None = None,
                                    figsize=(5, 4)) -> plt.Axes:
     """Stacked bar chart: for each stimulus, breakdown of significantly tuned
     neurons by monotonicity (positive / negative / non-monotonic).
+
+    When *modulated_mask* is provided, a light-grey ghost bar is drawn behind
+    each stacked bar showing the total modulated pool, with the count labelled
+    above it.
 
     Parameters
     ----------
@@ -1269,6 +1378,9 @@ def plot_monotonicity_stacked_bar(tunings: dict[str, SpeedTuning],
     colors : dict[str, str], optional
         Category colours. Default: positive=POS_COLOR (red),
         negative=NEG_COLOR (blue), non-monotonic=NM_COLOR (grey).
+    modulated_mask : dict[str, np.ndarray] | None, optional
+        Per-stimulus boolean masks ``(n_cells,)`` for running-modulated cells.
+        When provided, a ghost bar shows the total modulated pool per stimulus.
 
     Returns
     -------
@@ -1284,7 +1396,23 @@ def plot_monotonicity_stacked_bar(tunings: dict[str, SpeedTuning],
     labels = list(tunings.keys())
     categories = ['non-monotonic', 'negative', 'positive']
 
-    # fraction of significant cells in each category, per stimulus
+    # modulated pool: ghost bar behind the stacked bars
+    if modulated_mask is not None:
+        mod_counts = np.array([
+            int(modulated_mask[lbl].sum())
+            if lbl in modulated_mask and modulated_mask[lbl] is not None
+            else N_CELLS
+            for lbl in labels
+        ])
+        x = np.arange(len(labels))
+        ax.bar(x, mod_counts, 0.6, bottom=0, color='lightgray', alpha=0.35,
+               edgecolor='gray', linewidth=0.6, label='modulated pool', zorder=0)
+        for i, lbl in enumerate(labels):
+            ax.text(i, mod_counts[i] + 0.5, str(int(mod_counts[i])),
+                    ha='center', va='bottom', fontsize=9, color='gray',
+                    fontweight='bold')
+
+    # breakdown of significant cells in each category, per stimulus
     counts = {}
     for lbl in labels:
         t = tunings[lbl]
@@ -1313,13 +1441,13 @@ def plot_monotonicity_stacked_bar(tunings: dict[str, SpeedTuning],
             v = counts[lbl][cat]
             if v > 0:
                 y_mid = y_offset + v / 2
-                ax.text(i, y_mid, f'# {str(int(v))}', ha='center', va='center',
+                ax.text(i, y_mid, f'{int(v)}', ha='center', va='center',
                         fontsize=8, color='white', fontweight='bold')
             y_offset += v
 
     ax.set_xticks(x)
     ax.set_xticklabels(labels)
-    ax.set_ylabel('# significant tuned neurons')
+    ax.set_ylabel('# tuned neurons')
     ax.legend(fontsize=9)
     return ax
 
@@ -1643,14 +1771,17 @@ def plot_modulated_tuned_grid(
         if lbl in modulated_mask:
             mod_mask[:, j] = np.asarray(modulated_mask[lbl], dtype=bool)
 
-    # Sort by total tuned count
-    tuned_any = np.zeros(I, dtype=bool)
+    # Sort by mean |ρ| (desc), then by modulated (desc)
+    mean_abs_rho = np.mean([np.abs(tunings[lbl].rho) for lbl in labels], axis=0)
+    ns = ~np.any([tunings[lbl].significant_mask for lbl in labels], axis=0)
+    mean_abs_rho[ns] = 0
+
+    modulated_any = np.zeros(I, dtype=bool)
     for j, lbl in enumerate(labels):
-        tuned_any |= tunings[lbl].significant_mask
-    n_tuned = np.zeros(I, dtype=int)
-    for j, lbl in enumerate(labels):
-        n_tuned += tunings[lbl].significant_mask.astype(int)
-    order = np.lexsort((-n_tuned, -np.arange(I)))
+        if lbl in modulated_mask:
+            modulated_any |= np.asarray(modulated_mask[lbl], dtype=bool)
+
+    order = np.lexsort((-modulated_any.astype(int), -mean_abs_rho))
 
     mod_mask = mod_mask[order]
 
@@ -1697,14 +1828,19 @@ def plot_modulated_tuned_grid(
 
     # Legend
     from matplotlib.patches import Patch as _Patch
+    from matplotlib.lines import Line2D
     legend_handles = [
         _Patch(facecolor=MOD_BG, label='modulated (BinaryMod.)'),
         _Patch(facecolor=COLS['positive'], label='positive'),
         _Patch(facecolor=COLS['negative'], label='negative'),
         _Patch(facecolor=COLS['non-monotonic'], label='non-monotonic'),
     ]
-    ax.legend(legend_handles,
-              [h.get_label() for h in legend_handles],
+    # significance stars
+    blank = Line2D([], [], color='none', marker='none', linestyle='')
+    legend_handles.extend([blank, blank, blank])
+    legend_labels = [h.get_label() for h in legend_handles[:4]]
+    legend_labels.extend(['p\u2264.01 *',  'p\u2264.001 **', 'p\u2264.0001 ***'])
+    ax.legend(legend_handles, legend_labels,
               loc='upper left', bbox_to_anchor=(1.02, 1), fontsize=9, frameon=False)
     fig.tight_layout()
     return fig
@@ -1741,7 +1877,7 @@ class BinaryModulation:
 
         # filled by classify_trials()
         self.run_mask = None          # np.ndarray, shape (n_trials,)
-        self.still_mask = None        # np.ndarray, shape (n_trials,)
+        self.still_trial_mask = None        # np.ndarray, shape (n_trials,)
         self.ignored_mask = None      # np.ndarray, shape (n_trials,)
 
         # filled by compute_mi()
@@ -1765,7 +1901,7 @@ class BinaryModulation:
 
     def _validate_state(self):
         """Verify classify_trials() has been run."""
-        if self.run_mask is None or self.still_mask is None:
+        if self.run_mask is None or self.still_trial_mask is None:
             raise ValueError("Please run classify_trials() first.")
 
     @cached_property
@@ -1796,7 +1932,7 @@ class BinaryModulation:
         Stores
         ------
         run_mask : np.ndarray of bool, shape ``(n_trials,)``
-        still_mask : np.ndarray of bool, shape ``(n_trials,)``
+        still_trial_mask : np.ndarray of bool, shape ``(n_trials,)``
         ignored_mask : np.ndarray of bool, shape ``(n_trials,)``
         """
         speed = np.asarray(self._td.running_speed)
@@ -1811,8 +1947,8 @@ class BinaryModulation:
         max_speed = np.nanmax(speed, axis=1)
 
         self.run_mask = (mean_speed > run_threshold) & (min_speed > still_threshold)
-        self.still_mask = (mean_speed < still_threshold) & (max_speed < run_threshold)
-        self.ignored_mask = ~(self.run_mask | self.still_mask)
+        self.still_trial_mask = (mean_speed < still_threshold) & (max_speed < run_threshold)
+        self.ignored_mask = ~(self.run_mask | self.still_trial_mask)
 
     def compute_mi(self):
         """Compute Modulation Index per cell.
@@ -1831,7 +1967,7 @@ class BinaryModulation:
         response_mean = self._response_mean
         n_cells = N_CELLS
 
-        if self.run_mask.sum() == 0 or self.still_mask.sum() == 0:
+        if self.run_mask.sum() == 0 or self.still_trial_mask.sum() == 0:
             self.mi = np.full(n_cells, np.nan)
             self.r_run = np.full(n_cells, np.nan)
             self.r_still = np.full(n_cells, np.nan)
@@ -1839,7 +1975,7 @@ class BinaryModulation:
 
         # Average response across running / still trials for each cell.
         self.r_run = np.nanmean(response_mean[:, self.run_mask], axis=1)      # (n_cells,)
-        self.r_still = np.nanmean(response_mean[:, self.still_mask], axis=1)  # (n_cells,)
+        self.r_still = np.nanmean(response_mean[:, self.still_trial_mask], axis=1)  # (n_cells,)
 
         denom = self.r_run + self.r_still
 
@@ -1964,7 +2100,7 @@ class BinaryModulation:
             run_values = []
             for condition in unique_conditions:
                 mask_condition = condition_masks[condition]
-                mask_c_still = mask_condition & self.still_mask
+                mask_c_still = mask_condition & self.still_trial_mask
                 mask_c_run = mask_condition & self.run_mask
                 if mask_c_still.sum() < min_trials_per_state:
                     continue
@@ -2245,7 +2381,7 @@ def summarize_binary_modulation_runs(results: dict) -> pd.DataFrame:
             "stimulus": stimulus,
             "n_trials": int(len(analysis.run_mask)),
             "n_running": int(analysis.run_mask.sum()),
-            "n_still": int(analysis.still_mask.sum()),
+            "n_still": int(analysis.still_trial_mask.sum()),
             "n_ignored": int(analysis.ignored_mask.sum()),
             "median_MI": float(np.nanmedian(analysis.mi)),
             "valid_gain_fits": int(np.isfinite(analysis.gain_a).sum()),
@@ -2975,7 +3111,7 @@ def extract_negative_trial_traces(
     responses = np.asarray(analysis._td.responses)  # (n_cells, n_trials, duration)
     state_masks = {
         "running": analysis.run_mask,
-        "still": analysis.still_mask,
+        "still": analysis.still_trial_mask,
     }
     labels = analysis.get_condition_labels()
 
