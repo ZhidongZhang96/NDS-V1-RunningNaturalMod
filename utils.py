@@ -3,11 +3,23 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
 from dataclasses import dataclass
+from functools import cached_property
 from scipy.stats import spearmanr, wilcoxon
 
+N_CELLS = 47
 STIMULI = ['drifting_gratings', 'static_gratings', 'natural_scenes', 'spontaneous']
+SHORT_STIM = ['dg', 'sg', 'ns', 'spont']
+
 def check_stim(stimulus:str):
     assert stimulus in STIMULI, f"You must choose one of the stimulus type: {STIMULI}"
+
+RESPONSE_WINDOWS = {
+    "drifting_gratings": (10, 60),
+    "static_gratings": (5, 7),
+    "natural_scenes": (5, 7),
+    "spontaneous": (0, 60),
+}
+
 
 # ==============================================================================
 # Data Loading
@@ -183,12 +195,7 @@ def extract_trials(
     trial_data = TrialData(stimulus=stimulus)
 
     if not response_window:
-        if stimulus == "drifting_gratings":
-            response_window = (10, 60)
-        elif stimulus == "spontaneous":
-            response_window = (0, 60)   # pseudo-trials
-        else:
-            response_window = (5, 7)    # static_gratings / natural_scenes
+        response_window = RESPONSE_WINDOWS[stimulus]
     offset, duration = response_window
 
     trial_data.params = {'offset': offset, 'duration': duration}
@@ -601,6 +608,11 @@ class BinaryModulation:
         self.delta_r = None           # np.ndarray, shape (n_cells,); r_run - r_still
         self.mi = None                # np.ndarray, shape (n_cells,); sign-safe MI
 
+        # filled by compute_running_ttest()
+        self.t_stat = None            # np.ndarray, shape (n_cells,)
+        self.t_pval = None            # np.ndarray, shape (n_cells,)
+        self.tuned_mask = None            # np.ndarray, shape (n_cells,)
+
         # filled by fit_gain_model()
         self.gain_a = None            # np.ndarray, shape (n_cells,)
         self.gain_b = None            # np.ndarray, shape (n_cells,)
@@ -611,6 +623,7 @@ class BinaryModulation:
         self.condition_run = None     # list length n_cells; each item shape (n_valid_conditions,)
         self.n_gain_conditions = None # np.ndarray, shape (n_cells,)
 
+<<<<<<< HEAD
         # --- Reserved for a future per-condition modulation test (NOT implemented) ---
         # A later analysis will, per stimulus and for spontaneous activity,
         # build matched running/still condition pairs and test them with a
@@ -632,6 +645,22 @@ class BinaryModulation:
         self.modulation_stat = None      # future: per-cell test statistic
         self.modulation_p = None         # future: per-cell p-value
         self.is_modulated = None         # future: per-cell boolean flag
+=======
+    def _validate_state(self):
+        """Verify classify_trials() has been run."""
+        if self.run_mask is None or self.still_mask is None:
+            raise ValueError("Please run classify_trials() first.")
+
+    @cached_property
+    def _response_mean(self):
+        """Trial-mean response per cell, computed once and cached."""
+        response = np.asarray(self._td.responses)
+        if response.ndim != 3:
+            raise ValueError(
+                f"Expected response with shape (n_cells, n_trial, duration), got {response.shape}"
+            )
+        return np.nanmean(response, axis=2)  # (n_cells, n_trials)
+>>>>>>> 12c871252748fff273095412eebe8bee602fe03e
 
     def classify_trials(
         self,
@@ -669,6 +698,7 @@ class BinaryModulation:
         self.still_mask = (mean_speed < still_threshold) & (max_speed < run_threshold)
         self.ignored_mask = ~(self.run_mask | self.still_mask)
 
+<<<<<<< HEAD
         return self.run_mask, self.still_mask, self.ignored_mask
 
     def compute_mi(self, epsilon: float = 1e-12):
@@ -676,6 +706,10 @@ class BinaryModulation:
 
         The formal metric for this analysis is the **sign-safe** MI, which
         keeps the signed numerator but uses an absolute-sum denominator:
+=======
+    def compute_mi(self):
+        """Compute Modulation Index per cell.
+>>>>>>> 12c871252748fff273095412eebe8bee602fe03e
 
         .. math::
 
@@ -711,26 +745,20 @@ class BinaryModulation:
         mi : np.ndarray, shape ``(n_cells,)``
             Sign-safe modulation index for each cell, bounded in ``[-1, 1]``.
         """
-        if self.run_mask is None or self.still_mask is None:
-            raise ValueError("Please run classify_trials() first.")
-
-        response = np.asarray(self._td.responses)
-        if response.ndim != 3:
-            raise ValueError(
-                f"Expected response with shape (n_cells, n_trial, duration), got {response.shape}"
-            )
-
-        # Average calcium response over the response window.
-        response_mean = np.nanmean(response, axis=2)  # (n_cells, n_trials)
-
-        n_cells = response_mean.shape[0]
+        self._validate_state()
+        response_mean = self._response_mean
+        n_cells = N_CELLS
 
         if self.run_mask.sum() == 0 or self.still_mask.sum() == 0:
             self.mi = np.full(n_cells, np.nan)
             self.r_run = np.full(n_cells, np.nan)
             self.r_still = np.full(n_cells, np.nan)
+<<<<<<< HEAD
             self.delta_r = np.full(n_cells, np.nan)
             return self.mi
+=======
+            return
+>>>>>>> 12c871252748fff273095412eebe8bee602fe03e
 
         # Average response across running / still trials for each cell.
         # Upcast to float64 before the ratio: ΔF/F is stored as float32, and
@@ -747,7 +775,74 @@ class BinaryModulation:
         finite = np.isfinite(self.r_run) & np.isfinite(self.r_still)
         self.mi[finite] = self.delta_r[finite] / denom[finite]
 
-        return self.mi
+    def compute_running_ttest(self, threshold=0.05, min_conditions: int = 3):
+        """Paired t-test per cell on condition-level (R_run, R_still) pairs.
+
+        For each cell, the per-condition mean responses under running and
+        still (computed by :meth:`fit_gain_model`) are paired by stimulus
+        condition. A one-sample t-test on the diffs ``d_c = R_run_c -
+        R_still_c`` tests H0: mean(d) = 0 against H1: mean(d) ≠ 0.
+
+        This design controls for stimulus-condition identity: if running
+        and still trials happen to cover different sets of orientations or
+        spatial frequencies, the pairing cancels that out, whereas a pooled
+        trial-level t-test would confound stimulus tuning with speed tuning.
+
+        Requires :meth:`fit_gain_model` to have been called first (the
+        condition-level pairs are extracted there). Cells whose
+        ``condition_run`` / ``condition_still`` are ``None`` (e.g. spontaneous
+        activity) are left as NaN.
+
+        Parameters
+        ----------
+        threshold : float, optional
+            p-value threshold for ``tuned_mask``, by default 0.05.
+        min_conditions : int, optional
+            Minimum number of valid condition pairs required to run the
+            test, by default 3.
+
+        Stores
+        ------
+        t_stat : np.ndarray, shape ``(n_cells,)``
+            t-statistic (positive = running > still).
+        t_pval : np.ndarray, shape ``(n_cells,)``
+            Two-sided p-value for the paired test.
+        tuned_mask : np.ndarray of bool, shape ``(n_cells,)``
+            Cells with ``t_pval < threshold`` and enough conditions.
+        """
+        from scipy.stats import ttest_1samp
+
+        self._validate_state()
+        n_cells = N_CELLS
+
+        # condition-level pairs must be populated (fit_gain_model prerequisite)
+        if self.condition_still is None or self.condition_run is None:
+            raise ValueError(
+                "fit_gain_model() must be called before compute_running_ttest()"
+            )
+
+        t_stat = np.full(n_cells, np.nan)
+        t_pval = np.full(n_cells, np.nan)
+
+        for cell_index in range(n_cells):
+            still_c = self.condition_still[cell_index]
+            run_c = self.condition_run[cell_index]
+
+            if still_c is None or run_c is None or len(still_c) < min_conditions:
+                continue
+
+            diffs = np.asarray(run_c, dtype=float) - np.asarray(still_c, dtype=float)
+            diffs = diffs[np.isfinite(diffs)]
+
+            if len(diffs) < min_conditions:
+                continue
+            stat, pval = ttest_1samp(diffs, 0.0)
+            t_stat[cell_index] = stat
+            t_pval[cell_index] = pval
+
+        self.tuned_mask = t_pval < threshold
+        self.t_stat = t_stat
+        self.t_pval = t_pval
 
     def get_condition_labels(self):
         """Build one visual-stimulus condition label for each trial.
@@ -817,15 +912,9 @@ class BinaryModulation:
             stimuli with no condition structure, e.g. spontaneous), never
             left as ``None``.
         """
-        if self.run_mask is None or self.still_mask is None:
-            self.classify_trials()
-
-        response = np.asarray(self._td.responses)
-        if response.ndim != 3:
-            raise ValueError(f"Expected response with shape (n_cells, n_trial, duration), got {response.shape}")
-        response_mean = np.nanmean(response, axis=2) # (n_cells, n_trials)
-
-        n_cells, n_trials = response_mean.shape
+        self._validate_state()
+        response_mean = self._response_mean
+        n_cells = N_CELLS
         labels = self.get_condition_labels()
 
         self.gain_a = np.full(n_cells, np.nan)
@@ -833,6 +922,7 @@ class BinaryModulation:
         self.gain_r2 = np.full(n_cells, np.nan)
         self.gain_valid = np.zeros(n_cells, dtype=bool)
         self.n_gain_conditions = np.zeros(n_cells, dtype=int)
+<<<<<<< HEAD
         self.condition_still = [
             np.array([], dtype=float) for _ in range(n_cells)
         ]
@@ -844,16 +934,24 @@ class BinaryModulation:
             # No visual-stimulus condition structure (e.g. spontaneous): the
             # gain model is undefined, and gain_valid is all False.
             return self.gain_a, self.gain_b
+=======
+        self.condition_still = [None] * n_cells
+        self.condition_run = [None] * n_cells
+
+        if labels is None:
+            return
+>>>>>>> 12c871252748fff273095412eebe8bee602fe03e
 
         unique_conditions = pd.unique(labels)
+        condition_masks = {
+            cond: np.array([label == cond for label in labels], dtype=bool)
+            for cond in unique_conditions
+        }
         for cell_index in range(n_cells):
             still_values = []
             run_values = []
             for condition in unique_conditions:
-                mask_condition = np.array(
-                    [label == condition for label in labels],
-                    dtype=bool,
-                )
+                mask_condition = condition_masks[condition]
                 mask_c_still = mask_condition & self.still_mask
                 mask_c_run = mask_condition & self.run_mask
                 if mask_c_still.sum() < min_trials_per_state:
@@ -877,11 +975,14 @@ class BinaryModulation:
             if len(run_values) < min_conditions:
                 continue
 
+<<<<<<< HEAD
             # A (near-)constant set of still-condition values makes the
             # still -> run line unidentifiable (rank-deficient fit).
             if np.ptp(still_values) <= 1e-12:
                 continue
 
+=======
+>>>>>>> 12c871252748fff273095412eebe8bee602fe03e
             slope, intercept = np.polyfit(still_values, run_values, deg=1)
 
             #check the quality of the fit
@@ -893,7 +994,17 @@ class BinaryModulation:
 
             self.gain_a[cell_index] = slope
             self.gain_b[cell_index] = intercept
+    
+    # ------------- plotting & print -------------
+    
+    def print_tuned_cells(self):
+        assert self.tuned_mask is not None, "call compute_running_ttest() first"
+        assert self.t_pval is not None, "call compute_running_ttest() first"
+        print(f"Significantly tuned neurons: #{self.tuned_mask.sum()} \n {np.where(self.tuned_mask)[0]}")
+        for idx in np.where(self.tuned_mask)[0]:
+            print(f"  Cell {idx}: p = {self.t_pval[idx]:.5f}")
 
+<<<<<<< HEAD
             self.gain_valid[cell_index] = (
                 np.isfinite(slope)
                 and np.isfinite(intercept)
@@ -904,6 +1015,8 @@ class BinaryModulation:
     
     # ------------- plotting -------------
     
+=======
+>>>>>>> 12c871252748fff273095412eebe8bee602fe03e
     def plot_scatter(self, cell: int = None, ax=None) -> plt.Figure:
         """Scatter plot of running vs. still responses with gain model fit.
 
@@ -1073,9 +1186,7 @@ class BinaryModulation:
         return df
 
 
-# ==============================================================================
-# Analysis 2 — batch pipeline & reporting helpers
-# ==============================================================================
+# ------------- batch pipeline & reporting helpers -------------
 
 
 def run_binary_modulation_analysis(
@@ -1131,10 +1242,15 @@ def run_binary_modulation_analysis(
             still_threshold=still_threshold,
         )
         analysis.compute_mi()
+<<<<<<< HEAD
         analysis.fit_gain_model(
             min_trials_per_state=min_trials_per_state,
             min_conditions=min_gain_conditions,
         )
+=======
+        analysis.fit_gain_model(min_trials_per_state=min_trials_per_state)
+        analysis.compute_running_ttest()
+>>>>>>> 12c871252748fff273095412eebe8bee602fe03e
 
         results[stimulus] = analysis
 
@@ -1182,6 +1298,7 @@ def summarize_binary_modulation_runs(results: dict) -> pd.DataFrame:
 # diagnostics live separately in mi_audit_utils.py.
 
 
+<<<<<<< HEAD
 def compare_gratings_vs_natural(results: dict):
     """Paired grating-vs-natural-scenes comparison using the sign-safe MI.
 
@@ -1198,6 +1315,44 @@ def compare_gratings_vs_natural(results: dict):
     ``MI_grating`` is compared against natural-scenes MI with a paired
     Wilcoxon signed-rank test, using only cells with a finite MI for DG, SG,
     and NS.
+=======
+def _compare_gratings_vs_natural_impl(mi_dg, mi_sg, mi_ns, valid_dg, valid_sg, valid_ns, label_suffix=""):
+    """Core logic shared by raw and signsafe grating-vs-natural comparisons."""
+    mi_grating = np.nanmean(np.vstack([mi_dg, mi_sg]), axis=0)
+
+    valid = (
+        valid_dg & valid_sg & valid_ns
+        & np.isfinite(mi_grating) & np.isfinite(mi_ns)
+    )
+
+    grating_values = mi_grating[valid]
+    natural_values = mi_ns[valid]
+
+    stat, p = wilcoxon(grating_values, natural_values)
+
+    result_df = pd.DataFrame([{
+        "comparison": f"gratings_vs_natural_scenes{label_suffix}",
+        "n_cells": int(valid.sum()),
+        "median_grating_MI": float(np.nanmedian(grating_values)),
+        "median_natural_scene_MI": float(np.nanmedian(natural_values)),
+        "median_difference_NS_minus_grating": float(np.nanmedian(natural_values - grating_values)),
+        "wilcoxon_stat": float(stat),
+        "p_value": float(p),
+        "frac_NS_greater_than_grating": float(np.mean(natural_values > grating_values)),
+    }])
+
+    return result_df, valid, grating_values, natural_values
+
+
+def compare_gratings_vs_natural(results: dict, denom_threshold: float = 1e-3):
+    """Paired grating-vs-natural-scenes comparison of robust MI.
+
+    Trials are never pooled across stimulus classes: MI is computed
+    separately for drifting gratings, static gratings, and natural
+    scenes, and only the resulting per-cell MI values are combined.
+    For each matched cell, grating MI is the mean of the (robust)
+    drifting- and static-grating MI.
+>>>>>>> 12c871252748fff273095412eebe8bee602fe03e
 
     Parameters
     ----------
@@ -1216,19 +1371,181 @@ def compare_gratings_vs_natural(results: dict):
     natural_values : np.ndarray
         Natural-scenes MI for the matched, valid cells.
     """
+<<<<<<< HEAD
     mi_dg = np.asarray(results["drifting_gratings"].mi, dtype=float)
     mi_sg = np.asarray(results["static_gratings"].mi, dtype=float)
     mi_ns = np.asarray(results["natural_scenes"].mi, dtype=float)
     finite_dg = np.isfinite(mi_dg)
     finite_sg = np.isfinite(mi_sg)
     finite_ns = np.isfinite(mi_ns)
+=======
+    mi_dg, robust_dg = get_robust_mi(results["drifting_gratings"], denom_threshold)
+    mi_sg, robust_sg = get_robust_mi(results["static_gratings"], denom_threshold)
+    mi_ns, robust_ns = get_robust_mi(results["natural_scenes"], denom_threshold)
 
-    mi_grating = np.nanmean(np.vstack([mi_dg, mi_sg]), axis=0)
-
-    valid = (
-        finite_dg & finite_sg & finite_ns
-        & np.isfinite(mi_grating) & np.isfinite(mi_ns)
+    return _compare_gratings_vs_natural_impl(
+        mi_dg, mi_sg, mi_ns, robust_dg, robust_sg, robust_ns,
     )
+
+
+
+
+
+# ------------- sign-safe modulation index -------------
+#
+# The raw MI (BinaryModulation.compute_mi) uses R_run + R_still as its
+# denominator. For signed ΔF/F responses this denominator can itself be
+# negative, which can reverse the sign of MI relative to the biologically
+# meaningful direction of R_run - R_still. These helpers do not alter
+# compute_mi() or its output; they add a sign-safe alternative that keeps
+# the signed numerator but replaces the denominator with |R_run| + |R_still|,
+# which is never negative.
+
+
+def compute_sign_safe_mi(analysis: BinaryModulation, epsilon: float = 1e-12):
+    """Compute the sign-safe modulation index for one analysis.
+
+    .. math::
+
+        MI_{\\text{safe}} = \\frac{R_{\\text{run}} - R_{\\text{still}}}
+            {|R_{\\text{run}}| + |R_{\\text{still}}| + \\epsilon}
+
+    Unlike the raw MI, this denominator is always positive, so
+    :math:`\\mathrm{sign}(MI_{\\text{safe}})` always matches
+    :math:`\\mathrm{sign}(R_{\\text{run}} - R_{\\text{still}})`, and
+    :math:`MI_{\\text{safe}}` is always bounded in ``[-1, 1]``.
+
+    Parameters
+    ----------
+    analysis : BinaryModulation
+        Analysis with :meth:`BinaryModulation.compute_mi` already run, so
+        ``r_run`` / ``r_still`` are populated.
+    epsilon : float, optional
+        Small constant added to the denominator only to avoid division by
+        zero when both responses are exactly zero, by default ``1e-12``.
+
+    Returns
+    -------
+    mi_safe : np.ndarray, shape ``(n_cells,)``
+    denominator_safe : np.ndarray, shape ``(n_cells,)``
+        ``|R_run| + |R_still| + epsilon``.
+    finite_mask : np.ndarray of bool, shape ``(n_cells,)``
+        True where ``r_run`` and ``r_still`` are both finite.
+    """
+    r_run = np.asarray(analysis.r_run, dtype=float)
+    r_still = np.asarray(analysis.r_still, dtype=float)
+
+    finite_mask = np.isfinite(r_run) & np.isfinite(r_still)
+
+    denominator_safe = np.abs(r_run) + np.abs(r_still) + epsilon
+
+    mi_safe = np.full(r_run.shape, np.nan, dtype=float)
+    mi_safe[finite_mask] = (
+        r_run[finite_mask] - r_still[finite_mask]
+    ) / denominator_safe[finite_mask]
+
+    return mi_safe, denominator_safe, finite_mask
+
+
+def summarize_mi_versions(results: dict, epsilon: float = 1e-12) -> pd.DataFrame:
+    """Per-stimulus comparison of raw MI, sign-safe MI, and delta_R.
+
+    Parameters
+    ----------
+    results : dict
+        Mapping stimulus -> :class:`BinaryModulation` (already has
+        :meth:`compute_mi` run).
+    epsilon : float, optional
+        Passed to :func:`compute_sign_safe_mi`, by default ``1e-12``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns: stimulus, n_cells, n_negative_raw_denominator,
+        n_raw_sign_reversal, n_abs_raw_mi_gt_1, median_raw_mi,
+        median_safe_mi, median_delta_R, fraction_positive_raw_mi,
+        fraction_positive_safe_mi, fraction_positive_delta_R.
+    """
+    rows = []
+    for stimulus, analysis in results.items():
+        r_run = np.asarray(analysis.r_run, dtype=float)
+        r_still = np.asarray(analysis.r_still, dtype=float)
+        mi_raw = np.asarray(analysis.mi, dtype=float)
+        delta_r = r_run - r_still
+
+        mi_safe, _, _ = compute_sign_safe_mi(analysis, epsilon=epsilon)
+
+        raw_denom = r_run + r_still
+        negative_raw_denominator = np.isfinite(raw_denom) & (raw_denom < 0)
+
+        finite_raw = np.isfinite(mi_raw) & np.isfinite(delta_r)
+        sign_reversal = np.zeros(len(mi_raw), dtype=bool)
+        sign_reversal[finite_raw] = (
+            np.sign(mi_raw[finite_raw]) != np.sign(delta_r[finite_raw])
+        )
+
+        abs_mi_gt_1 = np.isfinite(mi_raw) & (np.abs(mi_raw) > 1)
+
+        finite_mi_raw = mi_raw[np.isfinite(mi_raw)]
+        finite_mi_safe = mi_safe[np.isfinite(mi_safe)]
+        finite_delta_r = delta_r[np.isfinite(delta_r)]
+
+        rows.append({
+            "stimulus": stimulus,
+            "n_cells": len(mi_raw),
+            "n_negative_raw_denominator": int(negative_raw_denominator.sum()),
+            "n_raw_sign_reversal": int(sign_reversal.sum()),
+            "n_abs_raw_mi_gt_1": int(abs_mi_gt_1.sum()),
+            "median_raw_mi": float(np.nanmedian(finite_mi_raw)) if finite_mi_raw.size else float("nan"),
+            "median_safe_mi": float(np.nanmedian(finite_mi_safe)) if finite_mi_safe.size else float("nan"),
+            "median_delta_R": float(np.nanmedian(finite_delta_r)) if finite_delta_r.size else float("nan"),
+            "fraction_positive_raw_mi": float(np.mean(finite_mi_raw > 0)) if finite_mi_raw.size else float("nan"),
+            "fraction_positive_safe_mi": float(np.mean(finite_mi_safe > 0)) if finite_mi_safe.size else float("nan"),
+            "fraction_positive_delta_R": float(np.mean(finite_delta_r > 0)) if finite_delta_r.size else float("nan"),
+        })
+
+    return pd.DataFrame(rows)
+
+
+def compare_gratings_vs_natural_signsafe(results: dict, epsilon: float = 1e-12):
+    """Paired grating-vs-natural-scenes comparison using sign-safe MI.
+
+    Mirrors :func:`compare_gratings_vs_natural`, but compares
+    :math:`MI_{\\text{safe}}` (see :func:`compute_sign_safe_mi`) instead of
+    the raw, denominator-unstable MI. Trials are never pooled across
+    stimulus classes: MI_safe is computed separately for drifting
+    gratings, static gratings, and natural scenes, and only the resulting
+    per-cell values are combined. For each matched cell, grating MI_safe
+    is the mean of the drifting- and static-grating MI_safe.
+
+    Parameters
+    ----------
+    results : dict
+        Must contain ``"drifting_gratings"``, ``"static_gratings"``, and
+        ``"natural_scenes"`` keys mapping to :class:`BinaryModulation`.
+    epsilon : float, optional
+        Passed to :func:`compute_sign_safe_mi`, by default ``1e-12``.
+
+    Returns
+    -------
+    result_df : pandas.DataFrame
+        One-row summary of the paired comparison.
+    valid : np.ndarray of bool, shape (n_cells,)
+        Mask of cells used in the comparison.
+    grating_values : np.ndarray
+        Grating MI_safe for the matched, valid cells.
+    natural_values : np.ndarray
+        Natural-scenes MI_safe for the matched, valid cells.
+    """
+    mi_dg, _, finite_dg = compute_sign_safe_mi(results["drifting_gratings"], epsilon=epsilon)
+    mi_sg, _, finite_sg = compute_sign_safe_mi(results["static_gratings"], epsilon=epsilon)
+    mi_ns, _, finite_ns = compute_sign_safe_mi(results["natural_scenes"], epsilon=epsilon)
+>>>>>>> 12c871252748fff273095412eebe8bee602fe03e
+
+    result_df, valid, grating_values, natural_values = _compare_gratings_vs_natural_impl(
+        mi_dg, mi_sg, mi_ns, finite_dg, finite_sg, finite_ns, label_suffix="_signsafe",
+    )
+<<<<<<< HEAD
 
     grating_values = mi_grating[valid]
     natural_values = mi_ns[valid]
@@ -1245,6 +1562,12 @@ def compare_gratings_vs_natural(results: dict):
         "p_value": float(p),
         "frac_NS_greater_than_grating": float(np.mean(natural_values > grating_values)),
     }])
+=======
+    result_df.rename(columns={
+        "median_grating_MI": "median_grating_MI_safe",
+        "median_natural_scene_MI": "median_natural_scene_MI_safe",
+    }, inplace=True)
+>>>>>>> 12c871252748fff273095412eebe8bee602fe03e
 
     return result_df, valid, grating_values, natural_values
 
@@ -1355,6 +1678,7 @@ def summarize_gain_model(results: dict) -> pd.DataFrame:
 # ------------- plotting -------------
 
 
+<<<<<<< HEAD
 def plot_metric_comparison(
     binary_results: dict,
     stimuli=None,
@@ -1388,12 +1712,20 @@ def plot_metric_comparison(
         ``metric="mi"`` (which is bounded) and to data range otherwise.
     ax : array-like of matplotlib.axes.Axes, optional
         Pre-made axes (one per stimulus). If ``None``, a figure is created.
+=======
+def plot_robust_mi_histograms(results: dict, denom_threshold: float = 1e-3):
+    """Plot the robust MI histogram for each stimulus in ``results``.
+
+    Robust cells satisfy ``|R_run + R_still| > denom_threshold``
+    (see :func:`get_robust_mi`); this is a filter, not a normalization.
+>>>>>>> 12c871252748fff273095412eebe8bee602fe03e
 
     Returns
     -------
     fig : matplotlib.figure.Figure
     axes : np.ndarray of matplotlib.axes.Axes
     """
+<<<<<<< HEAD
     if stimuli is None:
         stimuli = list(binary_results)
     stimuli = list(stimuli)
@@ -1426,6 +1758,25 @@ def plot_metric_comparison(
         panel.set_title(f"{stimulus}\nn = {int(finite.sum())} cells")
         panel.set_xlabel(metric)
         panel.legend(frameon=False, fontsize=8)
+=======
+    n = len(results)
+    fig, axes = plt.subplots(1, n, figsize=(4 * n, 4), sharey=True)
+    axes = np.atleast_1d(axes)
+
+    for ax, stimulus in zip(axes, results):
+        mi, robust = get_robust_mi(results[stimulus], denom_threshold)
+        mi_robust = mi[robust]
+        median_mi = np.nanmedian(mi_robust)
+
+        ax.hist(mi_robust, bins=20, alpha=0.8)
+        ax.axvline(median_mi, linestyle="--", color="black", label=f"median={median_mi:.3f}")
+        ax.axvline(0, linestyle=":", color="gray")
+
+        ax.set_xlim(-1, 1)
+        ax.set_title(stimulus)
+        ax.set_xlabel("Robust MI")
+        ax.legend(frameon=False)
+>>>>>>> 12c871252748fff273095412eebe8bee602fe03e
 
     axes[0].set_ylabel("Number of cells")
     return fig, axes
@@ -1524,6 +1875,96 @@ def plot_metadata_validation(aligned: dict, validation_df: pd.DataFrame = None, 
         ax.set_ylabel(ylabel)
 
     return fig, axes
+
+
+def plot_tuned_neurons_grid(computed_tuned: dict[str, np.ndarray],
+                            metadata_tuned: dict[str, np.ndarray] | None = None,
+                            figsize=(6, 10)) -> plt.Figure:
+    """Grid map comparing computed vs metadata-given tuned neurons.
+
+    Each column is a stimulus, each row is a cell. Cells are sorted by
+    descending total tuned-count (any source), then by both-tuned count.
+
+    Parameters
+    ----------
+    computed_tuned : dict[str, np.ndarray]
+        Per-stimulus boolean masks ``(n_cells,)`` for computed tuned neurons
+        (e.g. from :attr:`BinaryModulation.tuned_mask`).
+    metadata_tuned : dict[str, np.ndarray] | None
+        Per-stimulus boolean masks ``(n_cells,)`` for metadata-given tuned
+        neurons (e.g. from ``p_run_mod_* < 0.05``). Stimuli not present in
+        this dict are shown with computed-only tuning.
+    figsize : tuple
+        Figure size.
+
+    Returns
+    -------
+    plt.Figure
+    """
+    labels = list(computed_tuned.keys())
+    I = len(next(iter(computed_tuned.values())))
+    J = len(labels)
+
+    # category colours
+    BOTH_CLR = (0.65, 0.95, 0.65)       # green: both agree tuned
+    COMP_CLR = (0.55, 0.75, 0.95)       # blue: computed only
+    META_CLR = (0.95, 0.75, 0.55)       # orange: metadata only
+    NONE_CLR = (0.97, 0.97, 0.97)       # near-white: neither
+
+    # Build agreement matrix: 0=neither, 1=computed-only, 2=metadata-only, 3=both
+    agreement = np.zeros((I, J), dtype=int)
+    for j, lbl in enumerate(labels):
+        comp = np.asarray(computed_tuned[lbl], dtype=bool)
+        if metadata_tuned is not None and lbl in metadata_tuned:
+            meta = np.asarray(metadata_tuned[lbl], dtype=bool)
+            agreement[:, j] = np.where(comp & meta, 3,
+                                       np.where(comp, 1,
+                                                np.where(meta, 2, 0)))
+        else:
+            agreement[:, j] = comp.astype(int)
+
+    # Sort rows
+    n_tuned_any = (agreement > 0).sum(axis=1)
+    n_both = (agreement == 3).sum(axis=1)
+    order = np.lexsort((-n_tuned_any, -n_both, -np.arange(I)))
+
+    bg_map = {0: NONE_CLR, 1: COMP_CLR, 2: META_CLR, 3: BOTH_CLR}
+
+    # ── Plot ──
+    fig, ax = plt.subplots(figsize=figsize)
+
+    img = np.zeros((I, J, 3))
+    for i in range(I):
+        for j in range(J):
+            img[i, j] = bg_map[agreement[order[i], j]]
+    ax.imshow(img, aspect='auto', interpolation='nearest')
+
+    # Text markers: B = both, C = computed-only, M = metadata-only
+    txt_map = {1: 'C', 2: 'M', 3: 'B'}
+    txt_clr = {1: 'blue', 2: 'darkorange', 3: 'green'}
+    for i in range(I):
+        for j in range(J):
+            val = agreement[order[i], j]
+            if val > 0:
+                ax.text(j, i, txt_map[val], ha='center', va='center',
+                        fontsize=9, color=txt_clr[val], fontweight='bold')
+
+    ax.set(xticks=range(J), xticklabels=labels,
+           yticks=range(I), yticklabels=order,
+           ylabel='cell #', title='Tuned neurons: computed vs metadata')
+    ax.xaxis.set_ticks_position('top')
+    ax.xaxis.set_label_position('top')
+
+    # Legend
+    from matplotlib.patches import Patch as _Patch
+    ax.legend(
+        [_Patch(facecolor=BOTH_CLR), _Patch(facecolor=COMP_CLR),
+         _Patch(facecolor=META_CLR)],
+        ['Both tuned (B)', 'Computed only (C)', 'Metadata only (M)'],
+        loc='upper left', bbox_to_anchor=(1.02, 1), fontsize=9, frameon=False,
+    )
+    fig.tight_layout()
+    return fig
 
 
 # ==============================================================================
