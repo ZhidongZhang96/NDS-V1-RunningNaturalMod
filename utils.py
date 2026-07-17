@@ -926,7 +926,11 @@ class EncodingModel:
         Y = Y_tr[:, None] if one_d else Y_tr
         ybar = Y.mean(0)
         Yc = Y - ybar
-        U, s, Vt = np.linalg.svd(Xz, full_matrices=False)
+        try:
+            U, s, Vt = np.linalg.svd(Xz, full_matrices=False)
+        except np.linalg.LinAlgError:                          # rare gesdd non-convergence
+            import scipy.linalg
+            U, s, Vt = scipy.linalg.svd(Xz, full_matrices=False, lapack_driver="gesvd")
         UtY = U.T @ Yc                                          # (r, m)
         n, m = Xz.shape[0], Y.shape[1]; s2 = s ** 2
         best_gcv = np.full(m, np.inf); best_a = np.full(m, alphas[0], dtype=float)
@@ -941,18 +945,52 @@ class EncodingModel:
         pred = ((X_te - mu) / sd) @ B + ybar                   # (n_te, m)
         return pred[:, 0] if one_d else pred
 
-    def fit_all(self, n_folds=5, alphas=None, random_state=0):
+    @staticmethod
+    def _cv_splits(n_trials, n_folds=5, cv="blocked", gap=5, random_state=0):
+        """Build cross-validation folds.
+
+        ``cv="blocked"`` returns contiguous test blocks over the trials in their
+        natural (temporal) order, with the training set **purged** of trials
+        within ``gap`` of each test block — so calcium/running autocorrelation
+        cannot leak across the train/test boundary. Every trial is held out
+        exactly once (full pooled-R² coverage); only training trials are
+        dropped. ``cv="shuffled"`` returns the legacy random ``KFold`` (leaks for
+        sub-second trial spacing; kept for reproducing the pre-correction fits).
+        """
+        if cv == "shuffled":
+            from sklearn.model_selection import KFold
+            kf = KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+            return list(kf.split(np.arange(n_trials)))
+        if cv != "blocked":
+            raise ValueError(f"unknown cv {cv!r}; use 'blocked' or 'shuffled'")
+        idx = np.arange(n_trials)
+        bounds = np.linspace(0, n_trials, n_folds + 1).astype(int)
+        splits = []
+        for k in range(n_folds):
+            lo, hi = bounds[k], bounds[k + 1]
+            train = np.concatenate([idx[:max(0, lo - gap)], idx[min(n_trials, hi + gap):]])
+            splits.append((train, idx[lo:hi]))
+        return splits
+
+    def fit_all(self, n_folds=5, alphas=None, random_state=0, splits=None,
+                cv="blocked", gap=5):
         """Fit all four nested models per neuron with cross-validated R².
 
         Each neuron is fit by ridge regression (standardized features, λ chosen
-        by :class:`sklearn.linear_model.RidgeCV`, unpenalized intercept) under
-        ``n_folds``-fold cross-validation. The stimulus tuning ``f(S)`` is a
-        **fitted, ridge-penalized one-hot** design (:meth:`_stimulus_onehot`);
-        ridge shrinks the noisy per-condition estimates. The multiplicative term
-        gates running by the per-condition drive, recomputed from *training*
-        trials each fold (:meth:`_fold_stimulus_mean`) so the R² is leakage-free.
-        The stimulus-only Null/Add designs are shared across cells and fit as a
-        single multi-target ridge.
+        by GCV, unpenalized intercept) under ``n_folds``-fold cross-validation.
+        By default the folds are **contiguous time blocks with the training set
+        purged** within ``gap`` trials of each test block (``cv="blocked"``):
+        calcium and running are slowly autocorrelated, so a shuffled/random
+        K-fold interleaves held-out trials with their temporal neighbours and
+        inflates ΔR² for densely-packed stimuli (natural scenes / static
+        gratings, trials ~0.27 s apart) — a leakage that blocked CV removes.
+        Pass ``cv="shuffled"`` to reproduce the legacy (leaky) random split.
+        The stimulus tuning ``f(S)`` is a **fitted, ridge-penalized one-hot**
+        design (:meth:`_stimulus_onehot`); ridge shrinks the noisy per-condition
+        estimates. The multiplicative term gates running by the per-condition
+        drive, recomputed from *training* trials each fold
+        (:meth:`_fold_stimulus_mean`). The stimulus-only Null/Add designs are
+        shared across cells and fit as a single multi-target ridge.
 
         Parameters
         ----------
@@ -961,7 +999,21 @@ class EncodingModel:
         alphas : array-like, optional
             Ridge penalties to search; defaults to ``np.logspace(-3, 3, 13)``.
         random_state : int, optional
-            Seed for the fold split, by default 0.
+            Seed for the ``cv="shuffled"`` fold split, by default 0 (unused for
+            blocked CV, which is deterministic).
+        splits : list of (train_idx, test_idx), optional
+            Explicit cross-validation splits; when given, overrides ``cv``/``gap``.
+            The test blocks must partition all trials (every trial held out
+            exactly once) so the pooled R² has full coverage. Defaults to ``None``.
+        cv : {"blocked", "shuffled"}, optional
+            Fold scheme when ``splits`` is None, by default ``"blocked"``
+            (contiguous, purged — leakage-free). ``"shuffled"`` is the legacy
+            random ``KFold`` and leaks for sub-second trial spacing; use it only
+            to reproduce the pre-correction numbers.
+        gap : int, optional
+            Purge radius (in trials) for ``cv="blocked"``: training trials within
+            ``gap`` of a test block are dropped, removing calcium/running
+            autocorrelation across the train/test boundary. By default 5.
 
         Stores
         ------
@@ -975,8 +1027,6 @@ class EncodingModel:
         multiplicative term ``V·d̂ ∝ V``, so ``r2_mult`` coincides with
         ``r2_add`` (ridge tolerates the collinearity).
         """
-        from sklearn.model_selection import KFold
-
         if alphas is None:
             alphas = np.logspace(-3, 3, 13)
 
@@ -987,8 +1037,9 @@ class EncodingModel:
         models = ("null", "add", "mult", "full")
         yhat = {m: np.empty_like(R) for m in models}
 
-        kf = KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
-        for train_idx, test_idx in kf.split(np.arange(n_trials)):
+        if splits is None:
+            splits = self._cv_splits(n_trials, n_folds, cv, gap, random_state)
+        for train_idx, test_idx in splits:
             drive = self._fold_stimulus_mean(R, labels, train_idx)   # per-fold drive (leak-free)
             for model in models:
                 if model in ("null", "add"):

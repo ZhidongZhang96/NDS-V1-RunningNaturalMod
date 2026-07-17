@@ -87,3 +87,33 @@ def test_r2_decomposition_requires_fit():
     em = EncodingModel(_synthetic_td())
     with pytest.raises(RuntimeError):
         em.r2_decomposition()
+
+
+# ----------------------------- cross-validation ---------------------------
+
+def test_cv_splits_blocked_partitions_and_purges():
+    n, folds, gap = 60, 5, 5
+    splits = EncodingModel._cv_splits(n, folds, "blocked", gap)
+    # every trial held out exactly once (full pooled-R² coverage)
+    test_all = np.sort(np.concatenate([te for _, te in splits]))
+    assert np.array_equal(test_all, np.arange(n))
+    for train, test in splits:
+        assert np.intersect1d(train, test).size == 0            # no train/test overlap
+        lo, hi = test.min(), test.max()
+        # training is purged within `gap` trials of the contiguous test block
+        assert not np.any((train > lo - gap) & (train < hi + gap))
+
+
+def test_cv_default_is_blocked():
+    assert EncodingModel.fit_all.__defaults__[-2:] == ("blocked", 5)
+
+
+def test_fit_all_shuffled_still_runs():
+    td = _synthetic_td()
+    em = EncodingModel(td, n_basis=3).fit_all(n_folds=3, cv="shuffled")
+    assert np.isfinite(em.r2_full).all()
+
+
+def test_cv_splits_rejects_unknown():
+    with pytest.raises(ValueError):
+        EncodingModel._cv_splits(30, 5, "bogus", 5)

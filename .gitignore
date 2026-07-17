@@ -1,3 +1,10 @@
 __pycache__/
 .vscode/
 .claude/
+
+# AllenSDK downloads / cache (large; fetched on demand, not tracked)
+boc/ophys_experiment_data/
+boc/ophys_experiment_events/
+boc/cell_specimens.json
+boc/experiment_containers.json
+boc/ophys_experiments.json
