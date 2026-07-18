@@ -1,16 +1,28 @@
+import warnings
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from matplotlib.patches import Circle, Patch, Rectangle
 from pathlib import Path
+import textwrap
 from dataclasses import dataclass
-from functools import cached_property
-from scipy.stats import spearmanr, wilcoxon
-from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
+from scipy.stats import f_oneway, mannwhitneyu, spearmanr, ttest_1samp, wilcoxon
 
-N_CELLS = 47
 STIMULI = ['drifting_gratings', 'static_gratings', 'natural_scenes', 'spontaneous']
-SHORT_STIM = ['dg', 'sg', 'ns', 'spont']
+SHORT_STIM = ['DG', 'SG', 'NS', 'Spont']
+
+_STIM_TO_SHORT = dict(zip(STIMULI, SHORT_STIM))
+_SHORT_TO_STIM = dict(zip(SHORT_STIM, STIMULI))
+
+def stim_to_short(stim: str) -> str:
+    """Map full stimulus name (e.g. 'drifting_gratings') to short label (e.g. 'DG')."""
+    return _STIM_TO_SHORT.get(stim, stim)
+
+def short_to_stim(s: str) -> str:
+    """Map short label (e.g. 'DG') to full stimulus name (e.g. 'drifting_gratings')."""
+    return _SHORT_TO_STIM.get(s, s)
+
 def check_stim(stimulus:str):
     assert stimulus in STIMULI, f"You must choose one of the stimulus type: {STIMULI}"
 
@@ -174,6 +186,9 @@ class TrialData:
     running_speed: np.ndarray
     time: np.ndarray
     stimulus_params: dict | None = None
+
+    def __post_init__(self):
+        self.n_neurons = self.responses.shape[0]
 
 
 def extract_trials(
@@ -347,7 +362,7 @@ def find_preferred_conditions(td: TrialData, top_frac: float = 0.5):
     trial_mean = responses.mean(axis=-1)         # (n_cells, n_trials)
 
     unique_conditions = pd.unique(labels)
-    n_cells = N_CELLS
+    n_cells = td.n_neurons
     n_conditions = len(unique_conditions)
     n_top = max(1, int(round(n_conditions * top_frac)))  # at least 1
 
@@ -609,6 +624,34 @@ def _hex_to_rgb(h: str) -> tuple[float, float, float]:
     return tuple(int(h[i:i+2], 16) / 255 for i in (0, 2, 4))
 
 
+POS_RGB = _hex_to_rgb(POS_COLOR)
+NEG_RGB = _hex_to_rgb(NEG_COLOR)
+NM_RGB  = _hex_to_rgb(NM_COLOR)
+
+
+def _pvalue_stars(p: float) -> str:
+    """Return significance stars for a p-value: '***' / '**' / '*' / ''."""
+    if p <= 0.0001:
+        return '***'
+    elif p <= 0.001:
+        return '**'
+    elif p <= 0.01:
+        return '*'
+    return ''
+
+
+def _add_identity_line(ax, x, y, label="", **kwargs):
+    """Draw diagonal y=x line spanning the data range and set axis limits."""
+    lo = min(np.nanmin(x), np.nanmin(y))
+    hi = max(np.nanmax(x), np.nanmax(y))
+    m = 0.05 * max(hi - lo, 1e-3)
+    lo, hi = lo - m, hi + m
+    line_kwargs = dict(linestyle="--", linewidth=1, color="gray", label=label)
+    line_kwargs.update(kwargs)
+    ax.plot([lo, hi], [lo, hi], **line_kwargs)
+    ax.set_xlim(lo, hi)
+    ax.set_ylim(lo, hi)
+
 
 
 class SpeedTuning:
@@ -641,21 +684,16 @@ class SpeedTuning:
         Boolean mask ``(n_cells_picked, n_trials_pref)`` — per-neuron trial selection
         (preferred-condition trials from :func:`find_preferred_conditions`).
         Trials where the mask is False are set to NaN. None = all trials.
-    still_trial_mask : np.ndarray or None, optional
-        Boolean mask ``(n_trials,)`` — True = still trial to exclude from analysis.
-        Applied before neuron_mask and pref_trial_mask. None = keep all trials.
     """
 
     def __init__(self, trial_data: TrialData | dict[str, TrialData],
                  mode='equal_size', n_bins: int = 20,
-                 neuron_mask=None, pref_trial_mask=None,
-                 still_trial_mask=None):
+                 neuron_mask=None, pref_trial_mask=None):
         self._td = trial_data
         self.n_bins = n_bins
         self.mode = mode
         self.neuron_mask = neuron_mask  # if None, n_cells_picked = n_cells
         self.pref_trial_mask = pref_trial_mask  # if None, n_trials_pref = n_trials_total
-        self.still_trial_mask = still_trial_mask  # if None, keep all trials
 
         # by compute_tuning()
         self.responses: np.ndarray | None = None             # (n_cells_picked, n_trials_pref), neuron-masked only
@@ -789,7 +827,10 @@ class SpeedTuning:
     # ------------- mask application -------------
 
     def _apply_masks(self, responses, speeds):
-        """Apply still_trial_mask, neuron_mask, and pref_trial_mask in order.
+        """Apply neuron_mask and pref_trial_mask in order.
+
+        Note: still trials are NOT excluded — speed-distribution imbalance is
+        handled by :meth:`_subsample` instead.
 
         Parameters
         ----------
@@ -803,16 +844,10 @@ class SpeedTuning:
         responses : np.ndarray, shape ``(n_cells_picked, n_trials_pref)``
             Neuron-masked responses.
         speeds : np.ndarray, shape ``(n_trials_pref,)``
-            Still-filtered speeds (aligned to neuron-masked responses).
+            Speeds (aligned to neuron-masked responses).
         masked_responses : np.ndarray, shape ``(n_cells_picked, n_trials_pref)``
             Trial-masked responses (NaN where ``pref_trial_mask`` is False).
         """
-        # apply still_trial_mask — exclude still (non-running) trials
-        still_keep = ~self.still_trial_mask if self.still_trial_mask is not None else None
-        if still_keep is not None:
-            responses = responses[:, still_keep]
-            speeds = speeds[still_keep]
-
         # apply neuron_mask
         if self.neuron_mask is not None:
             responses = responses[self.neuron_mask]
@@ -820,8 +855,6 @@ class SpeedTuning:
         # apply pref_trial_mask (NaN-masked per-neuron trial selection)
         if self.pref_trial_mask is not None:
             mask = self.pref_trial_mask
-            if still_keep is not None:
-                mask = mask[:, still_keep]
             if self.neuron_mask is not None:
                 mask = mask[self.neuron_mask]
             masked_responses = responses.copy()
@@ -858,54 +891,58 @@ class SpeedTuning:
         self.bins_sub_ids = self.bins_ids
         self._subsample()
 
-    def significance_test(self, n_shuffles: int = 1000, threshold: float = 0.05,
-                           seed: int | None = None):
-        """Shuffle running-speed labels and re-compute tuning curves to assess significance.
+    def significance_test(self, threshold: float = 0.05):
+        """One-way ANOVA across speed bins to assess tuning significance.
 
-        Uses a permutation test: shuffles bin labels ``n_shuffles`` times to
-        build a null distribution of tuning-curve variances, then computes the
-        fraction of shuffled variances exceeding the observed variance as the
-        p-value for each cell.
-
-        Levene's t test of variance mentioned in (Christensen & Pillow, 2022).
-
+        For each cell, groups trial responses by their running-speed bin
+        (using :attr:`bins_sub_ids`), excludes NaN responses and
+        subsampled-out (-1) trials, then runs ``scipy.stats.f_oneway``
+        across bins. A significant p-value means the cell's mean response
+        differs across at least one speed bin (i.e., it is speed-tuned).
 
         Parameters
         ----------
-        n_shuffles : int, optional
-            Number of shuffles, by default 1000.
         threshold : float, optional
             Significance threshold, by default 0.05.
-        seed : int or None, optional
-            Random seed for reproducible shuffles.
 
         Stores
         ------
         levene_p_values : np.ndarray, shape ``(n_cells_picked,)``
+            p-values from one-way ANOVA across speed bins.
         significant_mask : np.ndarray of bool, shape ``(n_cells_picked,)``
+            True where p < threshold.
         """
-        assert self.mean_all_responses is not None, "call compute_tuning() first"
+        assert self.masked_responses is not None, "call compute_tuning() first"
         assert self.bins_sub_ids is not None, "call compute_tuning() first"
 
-        rng = np.random.default_rng(seed)
+        n_cells = self.masked_responses.shape[0]
+        p_values = np.full(n_cells, np.nan)
 
-        # the real tuning — variance across bins
-        vs_real = np.nanvar(self.mean_all_responses, axis=1)   # (n_cells_picked)
+        # bin IDs are 1..n_bins; -1 marks subsampled-out trials
+        valid_bins = np.arange(1, self.n_bins + 1)
 
-        # shuffled — permute bin labels, re-compute variance
-        vs_shuffled = []
-        for _ in range(n_shuffles):
-            # only shuffle non-(-1) bin ids; -1 (excluded trials) stay fixed
-            shuffled_bins_ids = self.bins_sub_ids.copy()
-            valid_mask = shuffled_bins_ids != -1
-            valid_ids = shuffled_bins_ids[valid_mask]
-            shuffled_bins_ids[valid_mask] = rng.permutation(valid_ids)
-            _, _, mean_all_res = self._binned_responses(bins_ids=shuffled_bins_ids) # (n_cells_picked, n_bins)
-            vs_shuffled.append(np.nanvar(mean_all_res, axis=1))
-        vs_shuffled = np.array(vs_shuffled).T   # (n_cells_picked, n_shuffles)
+        for i in range(n_cells):
+            cell_resp = self.masked_responses[i]  # (n_trials_pref,)
+            groups = []
+            for bid in valid_bins:
+                mask = self.bins_sub_ids == bid
+                vals = cell_resp[mask]
+                vals = vals[~np.isnan(vals)]
+                if len(vals) >= 2:      # ANOVA needs ≥2 values per group
+                    groups.append(vals)
+            if len(groups) >= 2:        # need at least 2 groups to compare
+                _, p_val = f_oneway(*groups)
+                p_values[i] = p_val
+            else:
+                p_values[i] = 1.0       # insufficient data
 
-        p_values = np.mean(vs_shuffled >= vs_real[:, np.newaxis], axis=1)    # (n_cells_picked)
+        # NaN protection: cells with all-NaN responses are not significant
+        if self.mean_all_responses is not None:
+            nan_rows = np.all(np.isnan(self.mean_all_responses), axis=1)
+            p_values[nan_rows] = 1.0
+
         significant_mask = p_values < threshold
+        significant_mask[np.isnan(p_values)] = False
 
         self.levene_p_values = p_values
         self.significant_mask = significant_mask
@@ -926,7 +963,6 @@ class SpeedTuning:
         assert self.bins_sub_ids is not None, "call compute_tuning() first"
         assert self.significant_mask is not None, "call significance_test() first"
 
-        from scipy.stats import spearmanr
         seq_speed_ids = self.bins_sub_ids   # (n_trials_pref)
         seq_responses = self.masked_responses  # (n_cells_picked, n_trials_pref)
 
@@ -947,6 +983,10 @@ class SpeedTuning:
             res = spearmanr(seq_speed_ids[cell_valid], seq_responses[i, cell_valid])
             rho[i] = res.statistic
             rho_p_values[i] = res.pvalue
+
+        # NaN protection: cells with no valid responses should not be significant
+        all_nan = np.all(np.isnan(seq_responses), axis=1)
+        self.significant_mask[all_nan] = False
 
         # categorize monotonicity: positive, negative, or non-monotonic but tuned
         masking = (rho_p_values < p_threshold) & (np.abs(rho) >= rho_threshold)
@@ -1135,11 +1175,6 @@ class SpeedTuning:
                     _plot_mean_sem(ax, self.bins_centers, spont_responses[mask],
                                    color, alpha=0.15, linestyle='--',
                                    marker_facecolor='none')
-            else:
-                # non-significant cells as grey background
-                if bg.any():
-                    _plot_mean_sem(ax, self.bins_centers, responses[bg],
-                                   'lightgray', alpha=0.5)
 
             # category cells in colour
             if n > 0:
@@ -1179,10 +1214,11 @@ class SpeedTuning:
             ax4.set_ylabel('')
 
         axes[0].set_ylabel(ylabel)
-        fig.tight_layout(rect=(0, 0, 1, 0.94))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            fig.tight_layout(rect=(0, 0, 1, 0.94))
 
         # legend: evoked vs spont line styles
-        from matplotlib.lines import Line2D
         legend_handles = [
             Line2D([], [], color='black', marker='o', markersize=3,
                    markerfacecolor='black', markeredgecolor='black'),
@@ -1226,7 +1262,18 @@ class SpeedTuning:
         plt.Figure
         """
         assert self.mean_all_responses is not None, "call compute_tuning() first"
-        spont_resps = spontaneous.mean_all_responses if spontaneous is not None else None
+
+        # align spontaneous responses: index by self.neuron_mask so cell count matches
+        if spontaneous is not None:
+            spont_resps = spontaneous.mean_all_responses
+            if self.neuron_mask is not None:
+                spont_resps = spont_resps[self.neuron_mask]
+        else:
+            spont_resps = None
+
+        # align modulated_mask: index by self.neuron_mask if subsetting was applied
+        if modulated_mask is not None and self.neuron_mask is not None:
+            modulated_mask = modulated_mask[self.neuron_mask]
 
         non_tuned_mod = None
         if modulated_mask is not None:
@@ -1277,9 +1324,17 @@ class SpeedTuning:
         if spontaneous is not None:
             assert spontaneous.mean_all_responses is not None, \
                 "spontaneous SpeedTuning: call compute_tuning() first"
-            spont_z = (spontaneous.mean_all_responses - mu) / sd
+            # align spontaneous responses to match this instance's cells
+            spont_resps = spontaneous.mean_all_responses
+            if self.neuron_mask is not None:
+                spont_resps = spont_resps[self.neuron_mask]
+            spont_z = (spont_resps - mu) / sd
         else:
             spont_z = None
+
+        # align modulated_mask: index by self.neuron_mask if subsetting was applied
+        if modulated_mask is not None and self.neuron_mask is not None:
+            modulated_mask = modulated_mask[self.neuron_mask]
 
         non_tuned_mod = None
         if modulated_mask is not None:
@@ -1295,7 +1350,8 @@ def plot_tuning_curves_grid(tunings: dict[str, SpeedTuning],
                              labels: list[str] | None = None,
                              cells: int | list[int] | None = None,
                              figsize=(8, 6),
-                             show_rho: bool = False, zscore=False) -> plt.Figure:
+                             show_rho: bool = False, zscore=False,
+                             modulated_mask: dict[str, np.ndarray] | None = None) -> plt.Figure:
     """Plot tuning curves for all stimuli in a 2x2 grid.
 
     Parameters
@@ -1312,6 +1368,11 @@ def plot_tuning_curves_grid(tunings: dict[str, SpeedTuning],
         Figure size, by default (8, 6).
     show_rho : bool, optional
         If True, display the mean Spearman rho of plotted cells in each subplot title.
+    modulated_mask : dict[str, np.ndarray] or None, optional
+        Per-stimulus boolean masks ``(n_cells,)`` for running-modulated cells.
+        When provided, only modulated cells are plotted (using SpeedTuning's
+        ``neuron_mask`` for non-spontaneous stimuli; for spontaneous, the
+        mask is used directly since its SpeedTuning has ``neuron_mask=None``).
 
     Returns
     -------
@@ -1328,16 +1389,35 @@ def plot_tuning_curves_grid(tunings: dict[str, SpeedTuning],
 
     for i, lbl in enumerate(labels):
         ax = axes.flat[i]
+        t = tunings[lbl]
+
+        # Determine cells to plot: restrict to modulated cells when mask given
+        plot_cells = cells
+        if modulated_mask is not None:
+            mm = modulated_mask.get(lbl)
+            if mm is not None:
+                if t.neuron_mask is not None:
+                    # SpeedTuning already filtered by neuron_mask (= modulated cells)
+                    # No need to re-index — all cells are modulated
+                    plot_cells = None
+                else:
+                    # neuron_mask is None (spontaneous) — filter to modulated cells
+                    mod_idx = np.where(mm)[0]
+                    plot_cells = mod_idx.tolist() if len(mod_idx) > 0 else []
+
+                if plot_cells is not None and len(plot_cells) == 0:
+                    ax.set_visible(False)
+                    continue
+
         if zscore:
-            tunings[lbl].plot_tuning_curve_zscore(cells=cells, ax=ax, semcolor='gray')
+            t.plot_tuning_curve_zscore(cells=plot_cells, ax=ax, semcolor='gray')
         else:
-            tunings[lbl].plot_tuning_curve(cells=cells, ax=ax, semcolor='gray')
-            ax.set_ylim(bottom=0)
-        title = lbl
+            t.plot_tuning_curve(cells=plot_cells, ax=ax, semcolor='gray')
+            # ax.set_ylim(bottom=0)
+        title = stim_to_short(lbl)
         if show_rho:
-            t = tunings[lbl]
             assert t.rho is not None, "call compute_spearman() first"
-            rho_vals = t.rho[cells] if cells else t.rho
+            rho_vals = t.rho[plot_cells] if plot_cells is not None else t.rho
             title += f'  ($\\bar{{\\rho}}$={rho_vals.mean():.3f})'
         ax.set_title(title)
 
@@ -1354,7 +1434,178 @@ def plot_tuning_curves_grid(tunings: dict[str, SpeedTuning],
     for i in range(len(labels), 4):
         axes.flat[i].set_visible(False)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
+    return fig, axes
+
+
+def plot_modulated_counts(modulated_mask: dict[str, np.ndarray],
+                           total_cells: int | None = None,
+                           ax: plt.Axes = None,
+                           figsize=(4, 3)) -> plt.Axes:
+    """Bar chart of modulated neuron counts per stimulus.
+
+    Parameters
+    ----------
+    modulated_mask : dict[str, np.ndarray]
+        Per-stimulus boolean masks ``(n_cells,)`` for running-modulated cells.
+    total_cells : int or None, optional
+        If given, a dashed horizontal reference line is drawn at this height.
+    ax : plt.Axes, optional
+    figsize : tuple, optional
+
+    Returns
+    -------
+    plt.Axes
+    """
+    if ax is None:
+        _, ax = plt.subplots(figsize=figsize)
+
+    labels = list(modulated_mask.keys())
+    counts = [int(modulated_mask[lbl].sum()) for lbl in labels]
+    short_labels = [stim_to_short(lbl) for lbl in labels]
+
+    x = np.arange(len(labels))
+    ax.bar(x, counts, 0.55, color='lightgray', edgecolor='gray', linewidth=0.8)
+
+    for i, count in enumerate(counts):
+        ax.text(i, count + 0.3, str(count), ha='center', va='bottom',
+                fontsize=10, fontweight='bold')
+
+    if total_cells is not None:
+        ax.axhline(y=total_cells, color='gray', linestyle='--',
+                   linewidth=0.8, alpha=0.7)
+        ax.text(len(labels) - 1, total_cells + 0.3,
+                f'total={total_cells}', ha='right', va='bottom',
+                fontsize=10, color='gray')
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(short_labels)
+    ax.set_ylabel('modulated neurons')
+    ax.margins(y=0.15)
+    return ax
+
+def plot_modulated_venn(modulated_mask: dict[str, np.ndarray],
+                         figsize=(6, 6),
+                         ax: plt.Axes = None) -> plt.Figure:
+    """Venn diagram of running-modulated neurons across stimuli.
+
+    SG, NS, and Spont are shown as a 3-set Venn. Each region is labelled
+    with its count and the cell indices. Text wrapping and label anchoring
+    are optimized to prevent overlapping.
+
+    Parameters
+    ----------
+    modulated_mask : dict[str, np.ndarray]
+        Per-stimulus boolean masks ``(n_cells,)`` for running-modulated cells.
+    figsize : tuple, optional
+        Figure size (only used when *ax* is not provided).
+    ax : plt.Axes, optional
+        Axes to draw into. Creates a new figure if None.
+
+    Returns
+    -------
+    plt.Figure
+    """
+    sg = set(np.where(modulated_mask['static_gratings'])[0])
+    ns = set(np.where(modulated_mask['natural_scenes'])[0])
+    sp = set(np.where(modulated_mask['spontaneous'])[0])
+    dg = set(np.where(modulated_mask['drifting_gratings'])[0])
+
+    regions = {
+        'only_SG':     sorted(sg - ns - sp),
+        'only_NS':     sorted(ns - sg - sp),
+        'only_Spont':  sorted(sp - sg - ns),
+        'SG∩NS':       sorted((sg & ns) - sp),
+        'SG∩Spont':    sorted((sg & sp) - ns),
+        'NS∩Spont':    sorted((ns & sp) - sg),
+        'SG∩NS∩Spont': sorted(sg & ns & sp),
+    }
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+    ax.set_aspect('equal')
+
+    r = 1.25
+    side = 1.45
+    h = side * 3**0.5 / 2
+    
+    cen = {
+        'SG':    np.array([-side / 2, -h / 3]),
+        'NS':    np.array([ side / 2, -h / 3]),
+        'Spont': np.array([0,         2 * h / 3]),
+    }
+    color="#7F8C8D"
+    # colors = {'SG': '#E74C3C', 'NS': '#3498DB', 'Spont': '#7F8C8D'}
+    
+    label_pos = {
+        'Spont': np.array([0,                  2 * h / 3 + r + 0.1]),
+        'SG':    np.array([-side / 2 - r*0.7, -h / 3 - r*0.75]),
+        'NS':    np.array([ side / 2 + r*0.7, -h / 3 - r*0.75]),
+    }
+    label_align = {
+        'Spont': ('center', 'bottom'),
+        'SG':    ('right', 'top'),
+        'NS':    ('left', 'top'),
+    }
+
+    for name, pos in cen.items():
+        ax.add_patch(Circle(pos, r, facecolor=color,
+                            edgecolor=color, alpha=0.15, lw=2, zorder=1))
+        
+        l_pos, (ha, va) = label_pos[name], label_align[name]
+        display_name = name if name == 'Spont' else name[:2].upper() 
+        ax.text(l_pos[0], l_pos[1], display_name,
+                ha=ha, va=va, fontsize=16, fontweight='bold',
+                color=color, zorder=4)
+
+    txt = {
+        'only_Spont':      np.array([ 0,     1.50]),
+        'only_SG':         np.array([-1.25, -0.65]),
+        'only_NS':         np.array([ 1.25, -0.65]),
+        'SG∩Spont':        np.array([-0.85,  0.45]),
+        'NS∩Spont':        np.array([ 0.85,  0.45]),
+        'SG∩NS':           np.array([ 0,    -0.85]),
+        'SG∩NS∩Spont':     np.array([ 0,     0.05]), 
+    }
+
+    for key, idxs in regions.items():
+        pos = txt[key]
+        cnt = len(idxs)
+        if cnt == 0:
+            continue 
+
+        ax.text(pos[0], pos[1], str(cnt),
+                ha='center', va='center', fontsize=17, fontweight='bold', zorder=4)
+        
+        if cnt > 0:
+            show_cells = idxs[:10]
+            cell_str = ', '.join(map(str, show_cells))
+            if cnt > 10:
+                cell_str += ', ...'
+            
+            wrapped_str = textwrap.fill(cell_str, width=16)
+            
+            ax.text(pos[0], pos[1] - 0.18, wrapped_str,
+                    ha='center', va='top', fontsize=7, color='#444444', zorder=4)
+
+    dg_str = ', '.join(str(c) for c in sorted(dg))
+    ax.text(0, -2.1,
+            f'DG modulated: cell {dg_str}  (subset of SG ∩ NS)',
+            ha='center', fontsize=9, style='italic', color='#666666', zorder=4)
+
+    all_mod = sg | ns | sp | dg
+    outside = 47 - len(all_mod)
+    ax.text(2.30, -1.9, f'Not modulated\n{outside}',
+            ha='center', va='center', fontsize=10, fontweight='bold', color='#666666')
+
+    ax.set_xlim(-2.6, 2.8)
+    ax.set_ylim(-2.4, 2.7)
+    ax.axis('off')
+    
+    fig.tight_layout()
     return fig
+
 
 def plot_monotonicity_stacked_bar(tunings: dict[str, SpeedTuning],
                                    ax: plt.Axes = None,
@@ -1385,8 +1636,7 @@ def plot_monotonicity_stacked_bar(tunings: dict[str, SpeedTuning],
     -------
     plt.Axes
     """
-    if ax is None:
-        _, ax = _ensure_ax(ax, figsize=figsize)
+    _, ax = _ensure_ax(ax, figsize=figsize)
 
     if colors is None:
         colors = {'positive': POS_COLOR, 'negative': NEG_COLOR,
@@ -1397,19 +1647,25 @@ def plot_monotonicity_stacked_bar(tunings: dict[str, SpeedTuning],
 
     # modulated pool: ghost bar behind the stacked bars
     if modulated_mask is not None:
+        # n_neurons from first tuning (compute_spearman() required)
+        _first = next(iter(tunings.values()))
+        assert _first.rho is not None
+        n_neurons = len(_first.rho)
         mod_counts = np.array([
             int(modulated_mask[lbl].sum())
             if lbl in modulated_mask and modulated_mask[lbl] is not None
-            else N_CELLS
+            else n_neurons
             for lbl in labels
         ])
         x = np.arange(len(labels))
-        ax.bar(x, mod_counts, 0.6, bottom=0, color='lightgray', alpha=0.35,
-               edgecolor='gray', linewidth=0.6, label='modulated pool', zorder=0)
+        bar_heights = mod_counts + 0.2
+        ax.bar(x, bar_heights, 0.6, bottom=0, color='lightgray', alpha=0.35,
+               edgecolor='gray', linewidth=0.6, label='modulated', zorder=0)
         for i, lbl in enumerate(labels):
             ax.text(i, mod_counts[i] + 0.5, str(int(mod_counts[i])),
                     ha='center', va='bottom', fontsize=9, color='gray',
                     fontweight='bold')
+        ax.margins(y=0.1)
 
     # breakdown of significant cells in each category, per stimulus
     counts = {}
@@ -1445,7 +1701,7 @@ def plot_monotonicity_stacked_bar(tunings: dict[str, SpeedTuning],
             y_offset += v
 
     ax.set_xticks(x)
-    ax.set_xticklabels(labels)
+    ax.set_xticklabels([stim_to_short(l) for l in labels])
     ax.set_ylabel('# tuned neurons')
     ax.legend(fontsize=9)
     return ax
@@ -1476,8 +1732,7 @@ def plot_rho_pairwise_scatter(tuning_a: SpeedTuning, tuning_b: SpeedTuning,
     assert tuning_a.significant_mask is not None, "call significance_test() first"
     assert tuning_b.significant_mask is not None, "call significance_test() first"
 
-    if ax is None:
-        _, ax = _ensure_ax(ax, figsize=(5, 5))
+    _, ax = _ensure_ax(ax, figsize=(5, 5))
 
     rho_a, rho_b = tuning_a.rho, tuning_b.rho
     sig_a, sig_b = tuning_a.significant_mask, tuning_b.significant_mask
@@ -1546,10 +1801,6 @@ def plot_monotonicity_grid(tunings: dict[str, SpeedTuning],
         assert t.monotonic_mask is not None, "call compute_spearman() first"
         assert t.levene_p_values is not None, "call significance_test() first"
 
-    # colours (matching module-level constants)
-    POS_RGB = _hex_to_rgb(POS_COLOR)
-    NEG_RGB = _hex_to_rgb(NEG_COLOR)
-    NM_RGB  = _hex_to_rgb(NM_COLOR)
     DARK_GRAY = (0.3, 0.3, 0.3)
 
     J = len(labels)
@@ -1614,7 +1865,6 @@ def plot_monotonicity_grid(tunings: dict[str, SpeedTuning],
     ax.imshow(img, aspect='auto', interpolation='nearest')
 
     # diagonal hatching for speed-tuned cells (under the text)
-    from matplotlib.patches import Rectangle
     if speed_tuned is not None:
         for i in range(I):
             for j in range(J):
@@ -1641,17 +1891,9 @@ def plot_monotonicity_grid(tunings: dict[str, SpeedTuning],
                     col = COLS['non-monotonic']
                 txt = f'{t.rho[ci]:.3f}'.replace('0.', '.', 1)
                 p = t.levene_p_values[ci]
-                stars = ''
-                if p <= 0.0001:
-                    stars = '***'
-                elif p <= 0.001:
-                    stars = '**'
-                elif p <= 0.01:
-                    stars = '*'
-                # elif p < 0.05:
-                #     stars = '*'
                 ax.text(j, i, txt, ha='center', va='center',
                         fontsize=8, color=col, fontweight='bold')
+                stars = _pvalue_stars(p)
                 if stars:
                     ax.text(j + 0.2, i, stars, ha='left', va='center',
                             fontsize=9, color='black', fontweight='bold', alpha=0.7)
@@ -1665,15 +1907,13 @@ def plot_monotonicity_grid(tunings: dict[str, SpeedTuning],
                                            fill=False, edgecolor='black',
                                            linewidth=2.5))
 
-    ax.set(xticks=range(J), xticklabels=labels,
+    ax.set(xticks=range(J), xticklabels=[stim_to_short(l) for l in labels],
            yticks=range(I), yticklabels=order,
            ylabel='cell #', title='Speed-tuning by monotonicity')
     ax.xaxis.set_ticks_position('top')
     ax.xaxis.set_label_position('top')
 
     # legend
-    from matplotlib.lines import Line2D
-    from matplotlib.patches import Patch
     legend_handles = [
         Patch(facecolor=COLS['positive']),
         Patch(facecolor=COLS['negative']),
@@ -1754,25 +1994,61 @@ def plot_modulated_tuned_grid(
         assert t.monotonic_mask is not None, "call compute_spearman() first"
         assert t.levene_p_values is not None, "call significance_test() first"
 
-    POS_RGB = _hex_to_rgb(POS_COLOR)
-    NEG_RGB = _hex_to_rgb(NEG_COLOR)
-    NM_RGB  = _hex_to_rgb(NM_COLOR)
-    DARK_GRAY = (0.3, 0.3, 0.3)
-    MOD_BG = (0.82, 0.88, 0.97)      # light blue for modulated
+    MOD_BG = (0.9, 0.9, 0.9)    # light gray for modulated
+
     COLS = {'positive': POS_RGB, 'negative': NEG_RGB, 'non-monotonic': NM_RGB}
 
     J = len(labels)
-    I = N_CELLS
+    # Always use full 47 cells from modulated_mask (not per-stimulus rho length)
+    I = len(next(iter(modulated_mask.values())))
 
-    # Build modulated background mask
+    # Expand per-stimulus SpeedTuning results to full (I,) arrays
+    expanded = {}
+    for lbl in labels:
+        t = tunings[lbl]
+        nm = t.neuron_mask
+        if nm is not None:
+            # Subsetted by neuron_mask — expand back to full cell count
+            rho = np.full(I, np.nan)
+            rho[nm] = t.rho
+            sig = np.zeros(I, dtype=bool)
+            sig[nm] = t.significant_mask
+            lev = np.full(I, np.nan)
+            lev[nm] = t.levene_p_values
+            mono = {}
+            for k in ('positive', 'negative', 'non-monotonic'):
+                m = np.zeros(I, dtype=bool)
+                m[nm] = t.monotonic_mask[k]
+                mono[k] = m
+        else:
+            # All cells used (e.g., spontaneous with neuron_mask=None)
+            rho = t.rho.copy()
+            sig = t.significant_mask.copy()
+            lev = t.levene_p_values.copy()
+            mono = {k: v.copy() for k, v in t.monotonic_mask.items()}
+        expanded[lbl] = {'rho': rho, 'sig': sig, 'lev': lev, 'mono': mono}
+
+    # Build modulated background mask (already full cell count)
     mod_mask = np.zeros((I, J), dtype=bool)
     for j, lbl in enumerate(labels):
         if lbl in modulated_mask:
             mod_mask[:, j] = np.asarray(modulated_mask[lbl], dtype=bool)
 
+    # NaN-out SpeedTuning data for non-modulated cells per stimulus,
+    # so they never display even if mod_mask/ordering edge cases arise
+    for j, lbl in enumerate(labels):
+        col_mask = mod_mask[:, j]
+        ex = expanded[lbl]
+        ex['rho'][~col_mask] = np.nan
+        ex['sig'][~col_mask] = False
+        for k in ('positive', 'negative', 'non-monotonic'):
+            ex['mono'][k][~col_mask] = False
+
     # Sort by mean |ρ| (desc), then by modulated (desc)
-    mean_abs_rho = np.mean([np.abs(tunings[lbl].rho) for lbl in labels], axis=0)
-    ns = ~np.any([tunings[lbl].significant_mask for lbl in labels], axis=0)
+    rho_stack = np.abs(np.array([expanded[lbl]['rho'] for lbl in labels]))
+    with np.errstate(invalid='ignore'):
+        mean_abs_rho = np.nanmean(rho_stack, axis=0)
+    ns = ~np.any([expanded[lbl]['sig'] for lbl in labels], axis=0)
     mean_abs_rho[ns] = 0
 
     modulated_any = np.zeros(I, dtype=bool)
@@ -1782,63 +2058,71 @@ def plot_modulated_tuned_grid(
 
     order = np.lexsort((-modulated_any.astype(int), -mean_abs_rho))
 
+    # Only plot modulated neurons (modulated in at least one stimulus)
+    order = order[modulated_any[order]]
+    I_mod = len(order)
+
     mod_mask = mod_mask[order]
 
     fig, ax = plt.subplots(figsize=figsize)
 
     # Background: light blue for modulated, white otherwise
-    img = np.ones((I, J, 3))
+    img = np.ones((I_mod, J, 3))
     img[mod_mask] = MOD_BG
     ax.imshow(img, aspect='auto', interpolation='nearest')
 
-    # Text: coloured ρ + significance stars for tuned cells
-    for i in range(I):
+    # Text: coloured ρ / placeholder '-' for modulated-but-not-tuned cells
+    for i in range(I_mod):
         ci = order[i]
         for j, lbl in enumerate(labels):
-            t = tunings[lbl]
-            if t.significant_mask[ci]:
-                if t.monotonic_mask['positive'][ci]:
+            if not mod_mask[i, j]:
+                continue  # not modulated in this stimulus — leave blank
+            ex = expanded[lbl]
+            if ex['sig'][ci]:
+                if ex['mono']['positive'][ci]:
                     col = COLS['positive']
-                elif t.monotonic_mask['negative'][ci]:
+                elif ex['mono']['negative'][ci]:
                     col = COLS['negative']
                 else:
                     col = COLS['non-monotonic']
-                txt = f'{t.rho[ci]:.3f}'.replace('0.', '.', 1)
+                txt = f"{ex['rho'][ci]:.3f}".replace('0.', '.', 1)
                 ax.text(j, i, txt, ha='center', va='center',
                         fontsize=8, color=col, fontweight='bold')
                 # p-value stars
-                p = t.levene_p_values[ci]
-                stars = ''
-                if p <= 0.0001:
-                    stars = '***'
-                elif p <= 0.001:
-                    stars = '**'
-                elif p <= 0.01:
-                    stars = '*'
+                p = ex['lev'][ci]
+                stars = _pvalue_stars(p)
                 if stars:
                     ax.text(j + 0.25, i, stars, ha='left', va='center',
                             fontsize=8, color='black', fontweight='bold', alpha=0.6)
+            else:
+                # Modulated but not speed-tuned — show placeholder
+                ax.text(j, i, '-', ha='center', va='center',
+                        fontsize=10, color='gray')
 
-    ax.set(xticks=range(J), xticklabels=labels,
-           yticks=range(I), yticklabels=order,
-           ylabel='cell #', title='Modulated & tuned neurons')
+    ax.set(xticks=range(J), xticklabels=[stim_to_short(l) for l in labels],
+           yticks=range(I_mod), yticklabels=order,
+           ylabel='cell #')
     ax.xaxis.set_ticks_position('top')
     ax.xaxis.set_label_position('top')
 
     # Legend
-    from matplotlib.patches import Patch as _Patch
-    from matplotlib.lines import Line2D
+    blank = Line2D([], [], color='none', marker='none', linestyle='')
+    spearman_header = Line2D([], [], color='none', marker='none', linestyle='')
     legend_handles = [
-        _Patch(facecolor=MOD_BG, label='modulated (BinaryMod.)'),
-        _Patch(facecolor=COLS['positive'], label='positive'),
-        _Patch(facecolor=COLS['negative'], label='negative'),
-        _Patch(facecolor=COLS['non-monotonic'], label='non-monotonic'),
+        Patch(facecolor=MOD_BG, label='modulated (BinaryMod.)'),
+        spearman_header,
+        Patch(facecolor=COLS['positive'], label='positive'),
+        Patch(facecolor=COLS['negative'], label='negative'),
+        Patch(facecolor=COLS['non-monotonic'], label='non-monotonic'),
     ]
     # significance stars
-    blank = Line2D([], [], color='none', marker='none', linestyle='')
     legend_handles.extend([blank, blank, blank])
-    legend_labels = [h.get_label() for h in legend_handles[:4]]
-    legend_labels.extend(['p\u2264.01 *',  'p\u2264.001 **', 'p\u2264.0001 ***'])
+    legend_labels = [
+        'modulated (BinaryMod.)',
+        'Spearman $\\rho$',
+        'positive', 'negative', 'non-monotonic',
+        'p\u2264.01 *',  'p\u2264.001 **', 'p\u2264.0001 ***',
+    ]
     ax.legend(legend_handles, legend_labels,
               loc='upper left', bbox_to_anchor=(1.02, 1), fontsize=9, frameon=False)
     fig.tight_layout()
@@ -1882,7 +2166,7 @@ class BinaryModulation:
         # filled by compute_mi()
         self.r_run = None             # np.ndarray, shape (n_cells,)
         self.r_still = None           # np.ndarray, shape (n_cells,)
-        self.delta_r = None           # np.ndarray, shape (n_cells,); r_run - r_still
+        self.delta_r = None  # np.ndarray, shape (n_cells,); r_run - r_still
         self.mi = None                # np.ndarray, shape (n_cells,); sign-safe MI
 
         # filled by fit_gain_model()
@@ -1895,7 +2179,7 @@ class BinaryModulation:
         self.condition_run = None     # list length n_cells; each item shape (n_valid_conditions,)
         self.n_gain_conditions = None # np.ndarray, shape (n_cells,)
 
-        # filled by compute_running_ttest()
+        # filled by compute_modulated_neurons()
         #
         # A paired t-test per cell on condition-level (R_run, R_still) pairs
         # (built by fit_gain_model, see condition_run / condition_still).
@@ -1904,9 +2188,9 @@ class BinaryModulation:
         # overall mean still response), so a t-test cannot be run on it
         # directly — the paired per-condition differences used here come
         # from condition_run - condition_still instead.
-        self.t_stat = None            # np.ndarray, shape (n_cells,); t-statistic (positive = running > still)
-        self.t_pval = None            # np.ndarray, shape (n_cells,); two-sided p-value
-        self.modulated_mask = None    # np.ndarray of bool, shape (n_cells,); t_pval < threshold
+        self.stat = None            # np.ndarray, shape (n_cells,); t-statistic (positive = running > still) or mannwhitneyu statistic
+        self.pval = None            # np.ndarray, shape (n_cells,); two-sided p-value
+        self.modulated_mask = None    # np.ndarray of bool, shape (n_cells,); pval < threshold
 
     def classify_trials(
         self,
@@ -1983,7 +2267,7 @@ class BinaryModulation:
             ``r_run - r_still`` (denominator-free sensitivity measure). This
             is one aggregate number per cell; it is *not* a paired set and
             cannot be fed to a per-cell t-test (see
-            :meth:`compute_running_ttest`, which uses per-condition pairs).
+            :meth:`compute_modulated_neurons`, which uses per-condition pairs).
         mi : np.ndarray, shape ``(n_cells,)``
             Sign-safe modulation index for each cell, bounded in ``[-1, 1]``.
         """
@@ -2046,7 +2330,7 @@ class BinaryModulation:
         This method decouples the condition-level data collection from the
         gain-model fitting step, so that ``condition_still`` and
         ``condition_run`` can be updated independently (e.g. before running
-        :meth:`compute_running_ttest`).
+        :meth:`compute_modulated_neurons`).
 
         Parameters
         ----------
@@ -2140,6 +2424,7 @@ class BinaryModulation:
             stimuli with no condition structure, e.g. spontaneous), never
             left as ``None``.
         """
+        assert self._td.stimulus != 'spontaneous', "Spontaneous cannt fit gain model"
         assert self.condition_still is not None and self.condition_run is not None and self.n_gain_conditions is not None, "collect_condition_pairs() have to be ran first"
 
         n_cells = len(self.condition_still)
@@ -2151,7 +2436,7 @@ class BinaryModulation:
         if n_cells == 0 or self.n_gain_conditions.max() == 0:
             # No condition structure (e.g. spontaneous) or no valid pairs
             # for any cell: gain_model is undefined, gain_valid stays all False.
-            return self.gain_a, self.gain_b
+            return 
 
         for cell_index in range(n_cells):
             still_values = self.condition_still[cell_index]
@@ -2183,24 +2468,24 @@ class BinaryModulation:
                 and np.isfinite(self.gain_r2[cell_index])
             )
 
-        return self.gain_a, self.gain_b
+    def compute_modulated_neurons(self, threshold: float = 0.05, min_conditions: int = 3):
+        """Per-cell t-test comparing running vs. still responses.
 
-    def compute_running_ttest(self, threshold: float = 0.05, min_conditions: int = 3):
-        """Paired t-test per cell on condition-level (R_run, R_still) pairs.
+        Behaviour depends on whether the stimulus has a condition structure:
 
-        For each cell, the per-condition mean responses under running and
-        still (computed by :meth:`fit_gain_model`) are paired by stimulus
-        condition. A one-sample t-test on the diffs ``d_c = R_run_c -
-        R_still_c`` tests H0: mean(d) = 0 against H1: mean(d) != 0.
+        * **Stimuli with conditions** (e.g. ``drifting_gratings``): a **paired**
+          t-test on condition-level (R_run, R_still) pairs. This controls for
+          stimulus-condition identity — if running and still trials happen to
+          cover different orientations or spatial frequencies, the pairing
+          cancels that out, whereas a pooled trial-level t-test would confound
+          stimulus tuning with speed tuning.
 
-        This design controls for stimulus-condition identity: if running
-        and still trials happen to cover different sets of orientations or
-        spatial frequencies, the pairing cancels that out, whereas a pooled
-        trial-level t-test would confound stimulus tuning with speed tuning.
+        * **Spontaneous** (no conditions): a standard **two-sample** t-test
+          directly on the trial-level running vs. still responses.
 
-        Requires :meth:`fit_gain_model` to have been called first (the
-        condition-level pairs are built there). Cells with fewer than
-        ``min_conditions`` valid pairs (e.g. spontaneous, which has none)
+        For stimuli with conditions, :meth:`collect_condition_pairs` (or
+        :meth:`fit_gain_model`) must have been called first. Cells with fewer
+        than ``min_conditions`` valid pairs (conditions) or trials (spontaneous)
         are left as NaN / excluded from ``modulated_mask``.
 
         Parameters
@@ -2208,159 +2493,136 @@ class BinaryModulation:
         threshold : float, optional
             p-value threshold for ``modulated_mask``, by default 0.05.
         min_conditions : int, optional
-            Minimum number of valid condition pairs required to run the
-            test, by default 3.
+            For stimuli with conditions: minimum number of valid condition
+            pairs. For spontaneous: minimum number of trials per group
+            (running and still). By default 3.
 
         Stores
         ------
-        t_stat : np.ndarray, shape ``(n_cells,)``
+        stat : np.ndarray, shape ``(n_cells,)``
             t-statistic (positive = running > still).
-        t_pval : np.ndarray, shape ``(n_cells,)``
-            Two-sided p-value for the paired test.
+        pval : np.ndarray, shape ``(n_cells,)``
+            Two-sided p-value for the test.
         modulated_mask : np.ndarray of bool, shape ``(n_cells,)``
-            Cells with ``t_pval < threshold`` and enough conditions.
+            Cells with ``pval < threshold`` and enough data.
         """
-        from scipy.stats import ttest_1samp
-
-        if self.condition_still is None or self.condition_run is None:
-            raise ValueError(
-                "collect_condition_pairs() or fit_gain_model() must be "
-                "called before compute_running_ttest()"
-            )
+        assert self.condition_still is not None and self.condition_run is not None, (
+            "collect_condition_pairs() or fit_gain_model() must be "
+            "called before compute_modulated_neurons()"
+        )
 
         n_cells = len(self.condition_still)
-        t_stat = np.full(n_cells, np.nan)
-        t_pval = np.full(n_cells, np.nan)
+        stat = np.full(n_cells, np.nan)
+        pval = np.full(n_cells, np.nan)
 
-        for cell_index in range(n_cells):
-            still_c = self.condition_still[cell_index]
-            run_c = self.condition_run[cell_index]
+        # Detect spontaneous (no condition structure) by checking the first cell.
+        has_conditions = (
+            n_cells > 0
+            and self.condition_still[0] is not None
+            and len(self.condition_still[0]) > 0
+        )
 
-            if still_c is None or run_c is None or len(still_c) < min_conditions:
-                continue
+        if not has_conditions:
+            # --- Spontaneous: Wilcoxon rank-sum test on trial-level responses ---
+            response = np.asarray(self._td.responses)          # (n_cells, n_trials, duration)
+            if response.ndim == 3:
+                response_mean = np.nanmean(response, axis=2)   # (n_cells, n_trials)
+            else:
+                response_mean = response
 
-            diffs = np.asarray(run_c, dtype=float) - np.asarray(still_c, dtype=float)
-            diffs = diffs[np.isfinite(diffs)]
+            if self.run_mask is None or self.still_mask is None:
+                raise ValueError("Please run classify_trials() first.")
 
-            if len(diffs) < min_conditions:
-                continue
-            stat, pval = ttest_1samp(diffs, 0.0)
-            t_stat[cell_index] = stat
-            t_pval[cell_index] = pval
+            for cell_index in range(n_cells):
+                run_vals = response_mean[cell_index, self.run_mask]
+                still_vals = response_mean[cell_index, self.still_mask]
 
-        self.t_stat = t_stat
-        self.t_pval = t_pval
-        self.modulated_mask = t_pval < threshold
+                run_vals = run_vals[np.isfinite(run_vals)]
+                still_vals = still_vals[np.isfinite(still_vals)]
+
+                if len(run_vals) < min_conditions or len(still_vals) < min_conditions:
+                    continue
+
+                st, p = mannwhitneyu(run_vals, still_vals, alternative="two-sided")
+                stat[cell_index] = st
+                pval[cell_index] = p
+
+        else:
+            # --- Stimuli with conditions: paired t-test on condition means ---
+            for cell_index in range(n_cells):
+                still_c = self.condition_still[cell_index]
+                run_c = self.condition_run[cell_index]
+
+                if still_c is None or run_c is None or len(still_c) < min_conditions:
+                    continue
+
+                diffs = np.asarray(run_c, dtype=float) - np.asarray(still_c, dtype=float)
+                diffs = diffs[np.isfinite(diffs)]
+
+                if len(diffs) < min_conditions:
+                    continue
+                st, p = ttest_1samp(diffs, 0.0)
+                stat[cell_index] = st
+                pval[cell_index] = p
+
+        self.stat = stat
+        self.pval = pval
+        self.modulated_mask = pval < threshold
 
 
     # ------------- plotting & print -------------
 
-    def print_tuned_cells(self):
-        """Print the indices and p-values of cells with ``tuned_mask`` True."""
-        assert self.modulated_mask is not None, "call compute_running_ttest() first"
-        assert self.t_pval is not None, "call compute_running_ttest() first"
-        print(f"Significantly modulated neurons: #{self.modulated_mask.sum()} \n {np.where(self.modulated_mask)[0]}")
-        for idx in np.where(self.modulated_mask)[0]:
-            print(f"  Cell {idx}: p = {self.t_pval[idx]:.5f}")
+    def print_modulated_cells(self):
+        """Print the indices and p-values of cells with ``modulated_mask`` True."""
+        assert self.modulated_mask is not None, "call compute_modulated_neurons() first"
+        assert self.pval is not None, "call compute_modulated_neurons() first"
+        print(f"====== {self._td.stimulus}: n={self.modulated_mask.sum()} =====\n {np.where(self.modulated_mask)[0]}")
 
-    def plot_scatter(self, cell: int = None, ax=None) -> plt.Figure:
-        """Scatter plot of running vs. still responses with gain model fit.
 
-        Parameters
-        ----------
-        cell : int or None, optional
-            If given, plot a single cell. Otherwise show all cells
-            in subplots or a combined layout.
-        """
+    def plot_population_run_still(self, ax=None) -> plt.Figure:
+        """Scatter each cell's mean running vs. still response."""
         if self.mi is None:
             self.compute_mi()
 
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(5, 5))
-        else:
-            fig = ax.figure
+        fig, ax = _ensure_ax(ax, figsize=(5, 5))
 
-        if cell is None:
-            x = np.asarray(self.r_still, dtype=float)
-            y = np.asarray(self.r_run, dtype=float)
-
-            valid = np.isfinite(x) & np.isfinite(y)
-
-            ax.scatter(
-                x[valid],
-                y[valid],
-                alpha=0.75,
-                label="Cells",
-            )
-
-            title = f"{self._td.stimulus}: population response"
-
-        else:
-            if self.gain_a is None:
-                self.fit_gain_model()
-
-            x = np.asarray(self.condition_still[cell], dtype=float)
-            y = np.asarray(self.condition_run[cell], dtype=float)
-
-            valid = np.isfinite(x) & np.isfinite(y)
-
-            ax.scatter(
-                x[valid],
-                y[valid],
-                alpha=0.75,
-                label="Stimulus conditions",
-            )
-
-            slope = self.gain_a[cell]
-            intercept = self.gain_b[cell]
-
-            if valid.sum() >= 2 and np.isfinite(slope):
-                x_line = np.linspace(
-                    np.min(x[valid]),
-                    np.max(x[valid]),
-                    100,
-                )
-                y_line = slope * x_line + intercept
-
-                ax.plot(
-                    x_line,
-                    y_line,
-                    color="black",
-                    linewidth=2,
-                    label=f"Fit: y={slope:.2f}x{intercept:+.3f}",
-                )
-
-            title = (
-                f"{self._td.stimulus}: cell {cell} "
-                f"(n={valid.sum()} conditions)"
-            )
-
+        x = np.asarray(self.r_still, dtype=float)
+        y = np.asarray(self.r_run, dtype=float)
+        valid = np.isfinite(x) & np.isfinite(y)
+        ax.scatter(x[valid], y[valid], alpha=0.75, label="Cells")
         if valid.sum() > 0:
-            lower = min(np.min(x[valid]), np.min(y[valid]))
-            upper = max(np.max(x[valid]), np.max(y[valid]))
-
-            margin = 0.05 * max(upper - lower, 1e-3)
-            lower -= margin
-            upper += margin
-
-            identity_kwargs = dict(linestyle="--", linewidth=1, label="Run = still")
-            if cell is not None:
-                identity_kwargs["color"] = "gray"
-
-            ax.plot(
-                [lower, upper],
-                [lower, upper],
-                **identity_kwargs,
-            )
-
-            ax.set_xlim(lower, upper)
-            ax.set_ylim(lower, upper)
-
+            _add_identity_line(ax, x[valid], y[valid], label="Run = still")
         ax.set_xlabel("Mean response during still trials")
         ax.set_ylabel("Mean response during running trials")
-        ax.set_title(title)
+        ax.set_title(f"{self._td.stimulus}: population response")
         ax.legend(frameon=False)
+        return fig
 
+    def plot_cell_gain_fit(self, cell: int, ax=None) -> plt.Figure:
+        """Scatter condition-level running vs. still for one cell, with gain fit."""
+        if self.gain_a is None and self._td.stimulus != "spontaneous":
+            self.fit_gain_model()
+
+        fig, ax = _ensure_ax(ax, figsize=(5, 5))
+
+        x = np.asarray(self.condition_still[cell], dtype=float)
+        y = np.asarray(self.condition_run[cell], dtype=float)
+        valid = np.isfinite(x) & np.isfinite(y)
+        ax.scatter(x[valid], y[valid], alpha=0.75, label="Stimulus conditions")
+
+        if self.gain_a is not None:
+            slope, intercept = self.gain_a[cell], self.gain_b[cell]
+            if valid.sum() >= 2 and np.isfinite(slope):
+                x_line = np.linspace(np.min(x[valid]), np.max(x[valid]), 100)
+                ax.plot(x_line, slope * x_line + intercept, color="black",
+                        linewidth=2, label=f"Fit: y={slope:.2f}x{intercept:+.3f}")
+
+        if valid.sum() > 0:
+            _add_identity_line(ax, x[valid], y[valid], label="Run = still")
+        ax.set_xlabel("Mean response during still trials")
+        ax.set_ylabel("Mean response during running trials")
+        ax.set_title(f"{self._td.stimulus}: cell {cell} (n={valid.sum()} conditions)")
+        ax.legend(frameon=False)
         return fig
 
     def plot_mi_distribution(self, ax=None) -> plt.Figure:
@@ -2391,7 +2653,7 @@ class BinaryModulation:
         ax.set_xlim(-1, 1)
         ax.set_xlabel("Sign-safe MI")
         ax.set_ylabel("Number of cells")
-        ax.set_title(f"{self._td.stimulus}\nn = {int(np.isfinite(self.mi).sum())} cells")
+        ax.set_title(f"{stim_to_short(self._td.stimulus)}\nn = {int(np.isfinite(self.mi).sum())} cells")
         ax.legend(frameon=False, fontsize=8)
 
         return fig
@@ -2491,11 +2753,15 @@ def run_binary_modulation_analysis(
             min_trials_per_state=min_trials_per_state,
         )
 
-        analysis.compute_running_ttest()
+        analysis.compute_modulated_neurons()
         analysis.compute_mi()
-        analysis.fit_gain_model(
-            min_conditions=min_gain_conditions,
-        )
+
+        # Gain model requires stimulus-condition structure; skip for
+        # spontaneous (which has none).
+        if stimulus != "spontaneous":
+            analysis.fit_gain_model(
+                min_conditions=min_gain_conditions,
+            )
 
         results[stimulus] = analysis
 
@@ -2526,7 +2792,10 @@ def summarize_binary_modulation_runs(results: dict) -> pd.DataFrame:
             "n_still": int(analysis.still_mask.sum()),
             "n_ignored": int(analysis.ignored_mask.sum()),
             "median_sign_safe_MI": float(np.nanmedian(analysis.mi)),
-            "valid_gain_fits": int(np.asarray(analysis.gain_valid, dtype=bool).sum()),
+            "valid_gain_fits": int(np.asarray(
+                analysis.gain_valid if analysis.gain_valid is not None else [],
+                dtype=bool,
+            ).sum()),
         })
     return pd.DataFrame(rows)
 
@@ -2650,6 +2919,7 @@ def summarize_gain_model(results: dict) -> pd.DataFrame:
 def plot_metric_comparison(
     binary_results: dict,
     stimuli=None,
+    neurons_mask = None,
     metric: str = "mi",
     bins: int = 20,
     value_range=None,
@@ -2659,9 +2929,8 @@ def plot_metric_comparison(
 
     Draws a one-row grid of histograms, one panel per stimulus, for the
     chosen metric read directly off each :class:`BinaryModulation` instance.
-    This is the single generic cross-stimulus comparison helper; it replaces
-    the earlier per-metric, per-stimulus-combination plotting functions and
-    works for any subset of stimuli.
+    Optionally overlays a semi-transparent histogram for a subset of neurons
+    (e.g. running-modulated cells identified by ``modulated_mask``).
 
     Parameters
     ----------
@@ -2670,6 +2939,11 @@ def plot_metric_comparison(
     stimuli : iterable of str or None, optional
         Which stimuli to show and in what order. ``None`` (default) uses all
         keys of ``binary_results``.
+    neurons_mask : dict or np.ndarray or None, optional
+        If a dict, maps stimulus -> boolean array of shape ``(n_cells,)``
+        selecting neurons to highlight with a transparent overlay histogram.
+        If a single boolean array, the same mask is applied to all stimuli.
+        ``None`` (default) draws only the population histogram.
     metric : str, optional
         Attribute name to read per cell, e.g. ``"mi"`` (sign-safe MI, the
         default) or ``"delta_r"``.
@@ -2695,13 +2969,13 @@ def plot_metric_comparison(
 
     if ax is None:
         fig, axes = plt.subplots(
-            1, len(stimuli), figsize=(4.2 * len(stimuli), 3.8),
+            2,2, figsize=(8, 6),
             sharey=True, constrained_layout=True,
         )
+        axes = axes.flatten()
     else:
-        axes = ax
-        fig = np.atleast_1d(axes)[0].figure
-    axes = np.atleast_1d(axes)
+        axes = np.atleast_1d(ax).flatten()
+        fig = axes[0].figure
 
     for panel, stimulus in zip(axes, stimuli):
         analysis = binary_results[stimulus]
@@ -2712,10 +2986,36 @@ def plot_metric_comparison(
 
         panel.hist(vals, bins=bins, range=value_range, alpha=0.8, color="C0")
         panel.axvline(median, linestyle="--", color="black", label=f"median = {median:+.3f}")
-        panel.axvline(0, linestyle=":", color="gray", label="no modulation")
+        panel.axvline(0, linestyle="-", color="gray", alpha=0.3)
+
+        # Overlay histogram for the masked subset (e.g. modulated neurons).
+        if neurons_mask is not None:
+            mask = (
+                neurons_mask.get(stimulus)
+                if isinstance(neurons_mask, dict)
+                else neurons_mask
+            )
+            if mask is not None:
+                mask = np.asarray(mask, dtype=bool)
+                sub_vals = values[mask & finite]
+                if len(sub_vals) > 0:
+                    sub_median = np.nanmedian(sub_vals)
+                    panel.hist(
+                        sub_vals, bins=bins, range=value_range,
+                        alpha=0.5, color="C3",
+                    )
+                    panel.axvline(
+                        sub_median, linestyle="--", color="C3",
+                        linewidth=1.5,
+                        label=f"masked median = {sub_median:+.3f}",
+                    )
+
         if value_range is not None:
             panel.set_xlim(*value_range)
-        panel.set_title(f"{stimulus}\nn = {int(finite.sum())} cells")
+        if neurons_mask:
+            panel.set_title(f"{stim_to_short(stimulus)} (n={int(neurons_mask[stimulus].sum())}/{int(finite.sum())})")
+        else:
+            panel.set_title(f"{stim_to_short(stimulus)} (n={int(finite.sum())})")
         panel.set_xlabel(metric)
         panel.legend(frameon=False, fontsize=8)
 
@@ -2755,16 +3055,7 @@ def plot_grating_natural_paired_scatter(grating_values, natural_values, p_value=
         return fig, ax
 
     ax.scatter(grating_values, natural_values, alpha=0.75)
-
-    lower = min(np.min(grating_values), np.min(natural_values))
-    upper = max(np.max(grating_values), np.max(natural_values))
-    margin = 0.05 * max(upper - lower, 1e-3)
-    lower -= margin
-    upper += margin
-
-    ax.plot([lower, upper], [lower, upper], linestyle="--", linewidth=1, color="gray", label="NS = gratings")
-    ax.set_xlim(lower, upper)
-    ax.set_ylim(lower, upper)
+    _add_identity_line(ax, grating_values, natural_values, label="NS = gratings")
 
     ax.set_xlabel("Gratings MI: mean(DG, SG)")
     ax.set_ylabel("Natural scenes MI")
@@ -2775,6 +3066,80 @@ def plot_grating_natural_paired_scatter(grating_values, natural_values, p_value=
     ax.legend(frameon=False)
 
     return fig, ax
+
+
+def plot_gain_scatter(
+    results: dict,
+    stimuli=("drifting_gratings", "static_gratings", "natural_scenes"),
+    figsize=(12, 4),
+    r2_threshold: float = 0.0,
+) -> plt.Figure:
+    """Scatter gain_a vs gain_b for modulated neurons, colored by gain_r².
+
+    Creates a 1×N subplot grid (one panel per stimulus). Each panel shows a
+    scatter of gain_a (multiplicative coefficient, x) vs gain_b (additive
+    offset, y) for neurons marked as modulated (``modulated_mask``) with
+    valid gain fits (``gain_valid``). Point fill opacity reflects the gain
+    model R² — more opaque = better fit.
+
+    Parameters
+    ----------
+    results : dict
+        Mapping stimulus -> fitted :class:`BinaryModulation` instance
+        (``compute_running_ttest``, ``fit_gain_model`` must have been run).
+    stimuli : tuple of str, optional
+        Which stimuli to plot. Defaults to the three visually evoked stimuli
+        (spontaneous has no gain model).
+    figsize : tuple, optional
+        Figure dimensions, by default ``(12, 4)``.
+    r2_threshold : float, optional
+        Minimum gain R² for a neuron to be plotted. Cells below this
+        threshold are excluded. Defaults to 0.0 (show all modulated/valid).
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    n_stim = len(stimuli)
+    fig, axes = plt.subplots(1, n_stim, figsize=figsize, constrained_layout=True)
+    if n_stim == 1:
+        axes = np.atleast_1d(axes)
+
+    for ax, stimulus in zip(axes, stimuli):
+        analysis = results[stimulus]
+        mod = np.asarray(analysis.modulated_mask, dtype=bool)
+        valid = np.asarray(analysis.gain_valid, dtype=bool)
+        r2 = np.asarray(analysis.gain_r2, dtype=float)
+        mask = mod & valid & (r2 >= r2_threshold)
+
+        x = np.asarray(analysis.gain_a, dtype=float)
+        y = np.asarray(analysis.gain_b, dtype=float)
+
+        # Clip alpha to [0, 1]; negative R² is possible for poor fits.
+        alpha = np.clip(r2, 0, 1)
+
+        base_color = plt.cm.tab10(0)  # RGBA matching "C0"
+
+        for i in np.where(mask)[0]:
+            ax.scatter(
+                x[i], y[i],
+                facecolors=(base_color[0], base_color[1], base_color[2], alpha[i]),
+                edgecolors=(0, 0, 0, 0.5),
+                linewidths=0.3,
+                zorder=3,
+            )
+
+        ax.axhline(0, linestyle=":", color="gray")
+        # ax.axvline(0, linestyle="-", color="gray", linewidth=0.4)
+        ax.axvline(1, linestyle=":", color="gray")
+        n_shown = int(mask.sum())
+        base_n = int((mod & valid).sum())
+        title = f"{stim_to_short(stimulus)}\n{n_shown} / {base_n} modulated"
+        ax.set_title(title)
+        ax.set_xlabel("a (multiplicative)")
+        ax.set_ylabel("b (additive)")
+
+    return fig
 
 
 def plot_metadata_validation(aligned: dict, validation_df: pd.DataFrame = None, ylabel: str = "Sign-safe MI (ours)"):
@@ -2807,7 +3172,7 @@ def plot_metadata_validation(aligned: dict, validation_df: pd.DataFrame = None, 
 
         ax.scatter(ref, mi, alpha=0.75)
 
-        title = stimulus
+        title = stim_to_short(stimulus)
         if validation_df is not None:
             row = validation_df.loc[validation_df["stimulus"] == stimulus].iloc[0]
             title += f"\nrho={row['spearman_rho']:.2f}, p={row['p_value']:.2g}, n={int(row['n_cells'])}"
@@ -2816,6 +3181,116 @@ def plot_metadata_validation(aligned: dict, validation_df: pd.DataFrame = None, 
         ax.set_ylabel(ylabel)
 
     return fig, axes
+
+def plot_modulation_grid(
+    binary_results: dict,
+    stimuli=("drifting_gratings", "static_gratings", "natural_scenes", "spontaneous"),
+    figsize=(6, 10),
+) -> plt.Figure:
+    """Grid map of modulated neurons with gain parameters per stimulus.
+
+    Each row is a cell, each column a stimulus/spontaneous. The grid shows:
+    - Light blue background where ``modulated_mask`` is True.
+    - ``(gain_a, gain_b)`` text for visual stimuli (spontaneous has no gain
+      model and shows ``"—"`` instead).
+
+    Cells are sorted by number of stimuli in which they are modulated
+    (descending), so modulated-dominant cells appear at the top.
+
+    Parameters
+    ----------
+    binary_results : dict
+        Mapping stimulus -> fitted :class:`BinaryModulation` instance
+        (``compute_modulated_neurons``, ``fit_gain_model`` must have been
+        run for visual stimuli).
+    stimuli : tuple of str, optional
+        Which conditions to show and in what order.
+    figsize : tuple, optional
+        Figure size, by default ``(6, 10)``.
+
+    Returns
+    -------
+    plt.Figure
+    """
+    labels = list(stimuli)
+    J = len(labels)
+
+    # Per-stimulus modulated mask and gain text.
+    n_cells_list = [
+        len(np.asarray(binary_results[lbl].modulated_mask))
+        for lbl in labels
+    ]
+    I = max(n_cells_list)  # all stimuli share the same cell count
+
+    mod_mask = np.zeros((I, J), dtype=bool)
+    gain_texts = np.empty((I, J), dtype=object)
+    gain_a_vals = np.full((I, J), np.nan)  # for sorting
+
+    for j, lbl in enumerate(labels):
+        analysis = binary_results[lbl]
+        mod = np.asarray(analysis.modulated_mask, dtype=bool)
+        mod_mask[:, j] = mod
+
+        has_gain = analysis.gain_a is not None
+        for i in range(I):
+            if mod[i]:
+                if has_gain:
+                    a = analysis.gain_a[i]
+                    b = analysis.gain_b[i]
+                    gain_texts[i, j] = f"({a:.2f}, {b:.2f})"
+                    gain_a_vals[i, j] = a
+                else:
+                    gain_texts[i, j] = "—"
+            # else: leave gain_texts[i, j] as None (empty string below)
+
+    MOD_BG = (0.82, 0.88, 0.97)  # light blue
+
+    # Sort rows: by mean gain_a across modulated stimuli (gain_a available).
+    # Non-modulated cells (no valid gain_a in any stimulus) go to the bottom.
+    with np.errstate(invalid='ignore'):
+        gain_a_means = np.nanmean(np.where(mod_mask, gain_a_vals, np.nan), axis=1)
+    order = np.argsort(-gain_a_means)  # descending
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Background — reorder rows to match sorted order
+    img = np.ones((I, J, 3))
+    img[mod_mask] = MOD_BG
+    img = img[order]          # match text/yticklabel order
+    ax.imshow(img, aspect="auto", interpolation="nearest")
+
+    # Text — only for modulated cells
+    for i in range(I):
+        ci = order[i]
+        for j in range(J):
+            if mod_mask[ci, j] and gain_texts[ci, j]:
+                ax.text(
+                    j, i, gain_texts[ci, j],
+                    ha="center", va="center",
+                    fontsize=7,
+                )
+
+    ax.set(
+        xticks=range(J), xticklabels=[stim_to_short(l) for l in labels],
+        yticks=range(I), yticklabels=order,
+        ylabel="cell # (sorted)",
+        title="Modulated neurons — gain (a, b)",
+    )
+    ax.xaxis.set_ticks_position("top")
+    ax.xaxis.set_label_position("top")
+
+    legend_handles = [
+        Patch(facecolor=MOD_BG, label="modulated"),
+    ]
+    ax.legend(
+        handles=legend_handles,
+        loc="upper left",
+        bbox_to_anchor=(1.02, 1),
+        fontsize=9,
+        frameon=False,
+    )
+    fig.tight_layout()
+    return fig
 
 
 def plot_tuned_neurons_grid(computed_tuned: dict, metadata_tuned: dict = None, figsize=(6, 10)) -> plt.Figure:
@@ -2888,17 +3363,16 @@ def plot_tuned_neurons_grid(computed_tuned: dict, metadata_tuned: dict = None, f
                 ax.text(j, i, txt_map[val], ha='center', va='center',
                         fontsize=9, color=txt_clr[val], fontweight='bold')
 
-    ax.set(xticks=range(J), xticklabels=labels,
+    ax.set(xticks=range(J), xticklabels=[stim_to_short(l) for l in labels],
            yticks=range(I), yticklabels=order,
            ylabel='cell #', title='Tuned neurons: computed vs metadata')
     ax.xaxis.set_ticks_position('top')
     ax.xaxis.set_label_position('top')
 
     # Legend
-    from matplotlib.patches import Patch as _Patch
     ax.legend(
-        [_Patch(facecolor=BOTH_CLR), _Patch(facecolor=COMP_CLR),
-         _Patch(facecolor=META_CLR)],
+        [Patch(facecolor=BOTH_CLR), Patch(facecolor=COMP_CLR),
+         Patch(facecolor=META_CLR)],
         ['Both tuned (B)', 'Computed only (C)', 'Metadata only (M)'],
         loc='upper left', bbox_to_anchor=(1.02, 1), fontsize=9, frameon=False,
     )
