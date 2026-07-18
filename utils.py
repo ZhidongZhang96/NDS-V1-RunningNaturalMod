@@ -39,8 +39,8 @@ RESPONSE_WINDOWS = {
 # ==============================================================================
 
 
-def load_data(path="data"):
-    raw = dict(np.load(Path(path) / "visual_coding_data.npz", allow_pickle=True))
+def load_data(path="data", fname="visual_coding_data"):
+    raw = dict(np.load(Path(path) / f"{fname}.npz", allow_pickle=True))
     data = {
         "matched_cell_ids": raw["matched_cell_ids"],
         "templates": {},
@@ -71,6 +71,86 @@ def load_data(path="data"):
         elif parts[1] in ("t", "dff", "roi_masks", "max_projection", "running_speed"):
             s[parts[1]] = val
     return data
+
+
+def concat_per_cell(*arrays):
+    """Concatenate per-cell metric arrays from multiple containers.
+
+    Each input is an ``(n_cells_i,)`` or ``(n_cells_i, ...)`` array from one
+    container's analysis.  Returns them concatenated along axis 0 — the
+    pooled population vector.
+
+    Example::
+
+        # pool MI across containers for 'drifting_gratings':
+        pooled_mi = concat_per_cell(*[mr["drifting_gratings"].mi for mr in bm_list])
+    """
+    return np.concatenate([np.asarray(a) for a in arrays if a is not None], axis=0)
+
+
+def pool_binary_modulation(all_results):
+    """Pool BinaryModulation per-cell results from multiple containers.
+
+    ``all_results`` is a list of dicts ``{stimulus: BinaryModulation}`` as
+    returned by :func:`run_binary_modulation_analysis`. Returns a new dict
+    of wrapper objects whose per-cell attributes are concatenated across
+    containers, compatible with the plotting functions in this module.
+
+    Example::
+
+        bm_list = [run_binary_modulation_analysis(d, RESPONSE_WINDOWS) for d in data_list]
+        pooled = pool_binary_modulation(bm_list)
+        fig = plot_metric_comparison(pooled, metric="mi")
+    """
+    from types import SimpleNamespace
+    if not all_results:
+        return {}
+    stims = list(all_results[0].keys())
+    _PER_CELL_ATTRS = [
+        "mi", "delta_r", "r_run", "r_still",
+        "gain_a", "gain_b", "gain_r2", "gain_valid", "n_gain_conditions",
+        "modulated_mask", "p_values", "significant",
+    ]
+    pooled = {}
+    for stim in stims:
+        insts = [r[stim] for r in all_results]
+        kwargs = {}
+        for attr in _PER_CELL_ATTRS:
+            vals = [getattr(inst, attr, None) for inst in insts]
+            if all(v is not None for v in vals):
+                kwargs[attr] = np.concatenate([np.asarray(v) for v in vals], axis=0)
+            else:
+                # Fill with NaN for stimuli where this attr doesn't exist (e.g. gain for spontaneous)
+                n_cells = sum(len(np.asarray(getattr(inst, "mi", []))) for inst in insts)
+                kwargs[attr] = np.full(n_cells, np.nan)
+        kwargs["_td"] = SimpleNamespace(stimulus=stim)
+        pooled[stim] = SimpleNamespace(**kwargs)
+    return pooled
+
+
+def load_containers(path="data"):
+    """Load all ``container_*.npz`` files in a directory.
+
+    Returns a list of data dicts, each compatible with :func:`load_data` format.
+    Also returns the sorted list of container IDs.
+
+    Usage:
+        data_list, cids = load_containers("data")
+        for data in data_list:
+            td = extract_trials(data, "drifting_gratings")
+            # ...
+    """
+    p = Path(path)
+    files = sorted(p.glob("container_*.npz"))
+    if not files:
+        raise FileNotFoundError(f"No container_*.npz files found in {p}")
+    data_list = []
+    cids = []
+    for f in files:
+        cid = int(f.stem.split("_")[1])
+        cids.append(cid)
+        data_list.append(load_data(path, f.stem))
+    return data_list, cids
 
 
 def print_info(data):
@@ -231,9 +311,22 @@ def extract_trials(
         windows = []  # list of (session_key, start, end)
         for session_key in ("A", "B"):
             s = data["sessions"][session_key]
-            spon = s["stim_epoch_table"]
-            spon = spon[spon["stimulus"] == "spontaneous"]
-            epoch_start = int(spon["start"].values[0])  # There's only one spontaneous period per session
+            et = s["stim_epoch_table"]
+            spon = et[et["stimulus"] == "spontaneous"]
+            if len(spon) == 0:
+                # Build spontaneous windows from inter-epoch gaps
+                epochs = et.sort_values("start")
+                gap_starts = epochs["end"].values[:-1]
+                gap_ends = epochs["start"].values[1:]
+                for gs, ge in zip(gap_starts, gap_ends):
+                    if ge > gs:
+                        n_frames = ge - gs
+                        n_trials = (n_frames - offset) // duration
+                        for i in range(n_trials):
+                            windows.append((session_key, int(gs) + offset + i * duration,
+                                           int(gs) + offset + (i + 1) * duration))
+                continue
+            epoch_start = int(spon["start"].values[0])
             epoch_end = int(spon["end"].values[0])
 
             n_frames = epoch_end - epoch_start
