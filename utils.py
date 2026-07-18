@@ -154,7 +154,7 @@ class TrialData:
 def extract_trials(
     data,
     stimulus: str,
-    response_window: tuple = (0, 60),
+    response_window: tuple | None = None,
 ) -> TrialData:
     """Extract responses and running speed for a given stimulus (from all sessions).
 
@@ -723,7 +723,7 @@ class BinaryModulation:
             self.r_run = np.full(n_cells, np.nan)
             self.r_still = np.full(n_cells, np.nan)
             self.delta_r = np.full(n_cells, np.nan)
-            return self.mi
+            return 
 
         # Average response across running / still trials for each cell.
         # Upcast to float64 before the ratio: ΔF/F is stored as float32, and
@@ -740,7 +740,7 @@ class BinaryModulation:
         finite = np.isfinite(self.r_run) & np.isfinite(self.r_still)
         self.mi[finite] = self.delta_r[finite] / denom[finite]
 
-        return self.mi
+        return 
 
     def get_condition_labels(self):
         """Build one visual-stimulus condition label for each trial.
@@ -961,6 +961,7 @@ class BinaryModulation:
         self.t_pval = t_pval
         self.tuned_mask = t_pval < threshold
 
+
     # ------------- plotting & print -------------
 
     def print_tuned_cells(self):
@@ -1140,9 +1141,7 @@ class BinaryModulation:
         return df
 
 
-# ==============================================================================
-# Analysis 2 — batch pipeline & reporting helpers
-# ==============================================================================
+# ------------- batch pipeline & reporting helpers -------------
 
 
 def run_binary_modulation_analysis(
@@ -1237,9 +1236,7 @@ def summarize_binary_modulation_runs(results: dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-# ==============================================================================
-# Analysis 2 — downstream comparisons on the sign-safe MI
-# ==============================================================================
+# ------------- downstream comparisons on the sign-safe MI -------------
 #
 # BinaryModulation.compute_mi() produces the sign-safe MI (numerator
 # R_run - R_still over denominator |R_run| + |R_still| + epsilon), which is
@@ -1314,73 +1311,6 @@ def compare_gratings_vs_natural(results: dict):
     }])
 
     return result_df, valid, grating_values, natural_values
-
-
-def validate_mi_against_metadata(
-    results: dict,
-    metadata: pd.DataFrame,
-    matched_cell_ids,
-):
-    """Validate the sign-safe MI against Allen's precomputed running-modulation metrics.
-
-    Aligns ``metadata`` to ``matched_cell_ids`` and compares, per stimulus,
-    :attr:`BinaryModulation.mi` (the formal metric) against the Allen
-    ``run_mod_*`` column with a Spearman correlation. The raw /
-    denominator-filtered validation is diagnostic and lives in
-    ``mi_audit_utils``.
-
-    Parameters
-    ----------
-    results : dict
-        Must contain ``"drifting_gratings"``, ``"static_gratings"``, and
-        ``"natural_scenes"`` keys mapping to :class:`BinaryModulation`.
-    metadata : pandas.DataFrame
-        Table containing ``cell_specimen_id``, ``run_mod_dg``,
-        ``run_mod_sg``, ``run_mod_ns`` columns.
-    matched_cell_ids : array-like
-        Cell IDs defining row order (typically ``data["matched_cell_ids"]``).
-
-    Returns
-    -------
-    validation_df : pandas.DataFrame
-        Columns: stimulus, metadata_col, n_cells, spearman_rho, p_value,
-        median_our_mi, median_metadata_run_mod.
-    aligned : dict
-        Mapping stimulus -> {"mi": array, "ref": array} of the valid,
-        aligned values used for the correlation (and for plotting).
-    """
-    meta = metadata.set_index("cell_specimen_id").loc[matched_cell_ids]
-
-    mapping = {
-        "drifting_gratings": "run_mod_dg",
-        "static_gratings": "run_mod_sg",
-        "natural_scenes": "run_mod_ns",
-    }
-
-    rows = []
-    aligned = {}
-    for stimulus, meta_col in mapping.items():
-        analysis = results[stimulus]
-        mi_safe = np.asarray(analysis.mi, dtype=float)
-        finite_mask = np.isfinite(mi_safe)
-
-        ref = meta[meta_col].to_numpy()
-        valid = finite_mask & np.isfinite(mi_safe) & np.isfinite(ref)
-
-        rho, pval = spearmanr(mi_safe[valid], ref[valid])
-
-        rows.append({
-            "stimulus": stimulus,
-            "metadata_col": meta_col,
-            "n_cells": int(valid.sum()),
-            "spearman_rho": float(rho),
-            "p_value": float(pval),
-            "median_our_mi": float(np.nanmedian(mi_safe[valid])),
-            "median_metadata_run_mod": float(np.nanmedian(ref[valid])),
-        })
-        aligned[stimulus] = {"mi": mi_safe[valid], "ref": ref[valid]}
-
-    return pd.DataFrame(rows), aligned
 
 
 def summarize_gain_model(results: dict) -> pd.DataFrame:
