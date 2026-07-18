@@ -1904,9 +1904,9 @@ class BinaryModulation:
         # overall mean still response), so a t-test cannot be run on it
         # directly — the paired per-condition differences used here come
         # from condition_run - condition_still instead.
-        self.t_stat = None            # np.ndarray, shape (n_cells,)
-        self.t_pval = None            # np.ndarray, shape (n_cells,)
-        self.tuned_mask = None            # np.ndarray, shape (n_cells,)
+        self.t_stat = None            # np.ndarray, shape (n_cells,); t-statistic (positive = running > still)
+        self.t_pval = None            # np.ndarray, shape (n_cells,); two-sided p-value
+        self.modulated_mask = None    # np.ndarray of bool, shape (n_cells,); t_pval < threshold
 
     def classify_trials(
         self,
@@ -2035,49 +2035,48 @@ class BinaryModulation:
         """
         return _get_condition_labels(self._td)
         
-    def fit_gain_model(self, min_trials_per_state: int = 2, min_conditions: int = 3):
-        """Fit linear gain model: :math:`R_{\\text{run}} = a \\cdot R_{\\text{still}} + b`.
+    def collect_condition_pairs(self, min_trials_per_state: int = 2):
+        """Collect condition-level mean responses for running and still trials.
+
+        For each cell and each stimulus condition, computes the mean ΔF/F
+        response separately for running and still trials. Only conditions
+        with at least ``min_trials_per_state`` trials in both states are
+        retained.
+
+        This method decouples the condition-level data collection from the
+        gain-model fitting step, so that ``condition_still`` and
+        ``condition_run`` can be updated independently (e.g. before running
+        :meth:`compute_running_ttest`).
 
         Parameters
         ----------
         min_trials_per_state : int, optional
             Minimum number of running and (separately) still trials a
-            stimulus condition must have to contribute a data point to the
-            fit, by default 2.
-        min_conditions : int, optional
-            Minimum number of valid condition pairs a cell must have before
-            a line is fit at all, by default 3. A 2-point fit is always a
-            perfect but meaningless line, so this is deliberately larger
-            than the 2-point minimum ``np.polyfit`` would accept.
+            stimulus condition must have to be included, by default 2.
 
         Stores
         ------
-        gain_a : np.ndarray, shape ``(n_cells,)``
-            Multiplicative coefficient.
-        gain_b : np.ndarray, shape ``(n_cells,)``
-            Additive offset.
-        gain_valid : np.ndarray of bool, shape ``(n_cells,)``
-            True only where the fit used at least ``min_conditions`` points
-            with non-degenerate ``still`` values, and produced finite slope,
-            intercept, and R². Always fully initialized (all False for
-            stimuli with no condition structure, e.g. spontaneous), never
-            left as ``None``.
+        condition_still : list of np.ndarray
+            Per-cell list; each element is an array of mean still responses,
+            one per valid condition.
+        condition_run : list of np.ndarray
+            Per-cell list; each element is an array of mean running responses,
+            one per valid condition.
+        n_gain_conditions : np.ndarray, shape ``(n_cells,)``
+            Number of valid conditions per cell.
         """
-        if self.run_mask is None or self.still_mask is None:
-            self.classify_trials()
+        assert self.run_mask is not None and self.still_mask is not None, "classify_trials() have to be ran first"
 
         response = np.asarray(self._td.responses)
         if response.ndim != 3:
-            raise ValueError(f"Expected response with shape (n_cells, n_trial, duration), got {response.shape}")
-        response_mean = np.nanmean(response, axis=2) # (n_cells, n_trials)
+            raise ValueError(
+                f"Expected response with shape (n_cells, n_trial, duration), got {response.shape}"
+            )
+        response_mean = np.nanmean(response, axis=2)  # (n_cells, n_trials)
 
         n_cells, n_trials = response_mean.shape
         labels = self.get_condition_labels()
 
-        self.gain_a = np.full(n_cells, np.nan)
-        self.gain_b = np.full(n_cells, np.nan)
-        self.gain_r2 = np.full(n_cells, np.nan)
-        self.gain_valid = np.zeros(n_cells, dtype=bool)
         self.n_gain_conditions = np.zeros(n_cells, dtype=int)
         self.condition_still = [
             np.array([], dtype=float) for _ in range(n_cells)
@@ -2087,9 +2086,9 @@ class BinaryModulation:
         ]
 
         if labels is None:
-            # No visual-stimulus condition structure (e.g. spontaneous): the
-            # gain model is undefined, and gain_valid is all False.
-            return self.gain_a, self.gain_b
+            # No visual-stimulus condition structure (e.g. spontaneous):
+            # condition_still/condition_run stay as empty arrays.
+            return
 
         unique_conditions = pd.unique(labels)
         for cell_index in range(n_cells):
@@ -2113,12 +2112,50 @@ class BinaryModulation:
                     still_values.append(mean_still)
                     run_values.append(mean_run)
 
-            run_values = np.asarray(run_values, dtype=float)
-            still_values = np.asarray(still_values, dtype=float)
-
-            self.condition_run[cell_index] = run_values
-            self.condition_still[cell_index] = still_values
+            self.condition_run[cell_index] = np.asarray(run_values, dtype=float)
+            self.condition_still[cell_index] = np.asarray(still_values, dtype=float)
             self.n_gain_conditions[cell_index] = len(run_values)
+
+    def fit_gain_model(self, min_conditions: int = 3):
+        """Fit linear gain model: :math:`R_{\\text{run}} = a \\cdot R_{\\text{still}} + b`.
+
+        Parameters
+        ----------
+        min_conditions : int, optional
+            Minimum number of valid condition pairs a cell must have before
+            a line is fit at all, by default 3. A 2-point fit is always a
+            perfect but meaningless line, so this is deliberately larger
+            than the 2-point minimum ``np.polyfit`` would accept.
+
+        Stores
+        ------
+        gain_a : np.ndarray, shape ``(n_cells,)``
+            Multiplicative coefficient.
+        gain_b : np.ndarray, shape ``(n_cells,)``
+            Additive offset.
+        gain_valid : np.ndarray of bool, shape ``(n_cells,)``
+            True only where the fit used at least ``min_conditions`` points
+            with non-degenerate ``still`` values, and produced finite slope,
+            intercept, and R². Always fully initialized (all False for
+            stimuli with no condition structure, e.g. spontaneous), never
+            left as ``None``.
+        """
+        assert self.condition_still is not None and self.condition_run is not None and self.n_gain_conditions is not None, "collect_condition_pairs() have to be ran first"
+
+        n_cells = len(self.condition_still)
+        self.gain_a = np.full(n_cells, np.nan)
+        self.gain_b = np.full(n_cells, np.nan)
+        self.gain_r2 = np.full(n_cells, np.nan)
+        self.gain_valid = np.zeros(n_cells, dtype=bool)
+
+        if n_cells == 0 or self.n_gain_conditions.max() == 0:
+            # No condition structure (e.g. spontaneous) or no valid pairs
+            # for any cell: gain_model is undefined, gain_valid stays all False.
+            return self.gain_a, self.gain_b
+
+        for cell_index in range(n_cells):
+            still_values = self.condition_still[cell_index]
+            run_values = self.condition_run[cell_index]
 
             if len(run_values) < min_conditions:
                 continue
@@ -2130,7 +2167,7 @@ class BinaryModulation:
 
             slope, intercept = np.polyfit(still_values, run_values, deg=1)
 
-            #check the quality of the fit
+            # check the quality of the fit
             predicted_run = slope * still_values + intercept
             ss_res = np.sum((run_values - predicted_run) ** 2)
             ss_tot = np.sum((run_values - np.mean(run_values)) ** 2)
@@ -2164,12 +2201,12 @@ class BinaryModulation:
         Requires :meth:`fit_gain_model` to have been called first (the
         condition-level pairs are built there). Cells with fewer than
         ``min_conditions`` valid pairs (e.g. spontaneous, which has none)
-        are left as NaN / excluded from ``tuned_mask``.
+        are left as NaN / excluded from ``modulated_mask``.
 
         Parameters
         ----------
         threshold : float, optional
-            p-value threshold for ``tuned_mask``, by default 0.05.
+            p-value threshold for ``modulated_mask``, by default 0.05.
         min_conditions : int, optional
             Minimum number of valid condition pairs required to run the
             test, by default 3.
@@ -2180,14 +2217,15 @@ class BinaryModulation:
             t-statistic (positive = running > still).
         t_pval : np.ndarray, shape ``(n_cells,)``
             Two-sided p-value for the paired test.
-        tuned_mask : np.ndarray of bool, shape ``(n_cells,)``
+        modulated_mask : np.ndarray of bool, shape ``(n_cells,)``
             Cells with ``t_pval < threshold`` and enough conditions.
         """
         from scipy.stats import ttest_1samp
 
         if self.condition_still is None or self.condition_run is None:
             raise ValueError(
-                "fit_gain_model() must be called before compute_running_ttest()"
+                "collect_condition_pairs() or fit_gain_model() must be "
+                "called before compute_running_ttest()"
             )
 
         n_cells = len(self.condition_still)
@@ -2212,17 +2250,17 @@ class BinaryModulation:
 
         self.t_stat = t_stat
         self.t_pval = t_pval
-        self.tuned_mask = t_pval < threshold
+        self.modulated_mask = t_pval < threshold
 
 
     # ------------- plotting & print -------------
 
     def print_tuned_cells(self):
         """Print the indices and p-values of cells with ``tuned_mask`` True."""
-        assert self.tuned_mask is not None, "call compute_running_ttest() first"
+        assert self.modulated_mask is not None, "call compute_running_ttest() first"
         assert self.t_pval is not None, "call compute_running_ttest() first"
-        print(f"Significantly tuned neurons: #{self.tuned_mask.sum()} \n {np.where(self.tuned_mask)[0]}")
-        for idx in np.where(self.tuned_mask)[0]:
+        print(f"Significantly modulated neurons: #{self.modulated_mask.sum()} \n {np.where(self.modulated_mask)[0]}")
+        for idx in np.where(self.modulated_mask)[0]:
             print(f"  Cell {idx}: p = {self.t_pval[idx]:.5f}")
 
     def plot_scatter(self, cell: int = None, ax=None) -> plt.Figure:
@@ -2449,9 +2487,13 @@ def run_binary_modulation_analysis(
             run_threshold=run_threshold,
             still_threshold=still_threshold,
         )
+        analysis.collect_condition_pairs(
+            min_trials_per_state=min_trials_per_state,
+        )
+
+        analysis.compute_running_ttest()
         analysis.compute_mi()
         analysis.fit_gain_model(
-            min_trials_per_state=min_trials_per_state,
             min_conditions=min_gain_conditions,
         )
 
