@@ -2,7 +2,7 @@
 
 Final project for **Neural Data Science 2026** (Prof. Philipp Berens), GTC, Tübingen.
 
-**Group members:** **[@Zhidong Zhang](https://github.com/ZhidongZhang96)**, **[@Yuzhe Han](https://github.com/Hzzz12138)** and **[@Bach Nguyen](https://github.com/bachnguyenTE)**.
+**Group members:** **[@Zhidong Zhang](https://github.com/ZhidongZhang96)**, **[@Bach Nguyen](https://github.com/bachnguyenTE)** and **[@Yuzhe Han](https://github.com/Hzzz12138)**.
 
 ## What this project studies
 
@@ -122,5 +122,5 @@ Open [`visual_coding.ipynb`](visual_coding.ipynb) and select the **"Python (alle
 
 ## Development
 
-- Branches: `dev` (work in progress), `master` (stable).
+- Branches: `dev` (work in progress), `main` (stable).
 - The notebook auto-reloads `utils.py` via `%autoreload 2`, so edits to `utils.py` take effect without restarting the kernel.

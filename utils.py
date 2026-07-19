@@ -3305,6 +3305,68 @@ def plot_gain_scatter(
     return fig
 
 
+def plot_gain_r2_distribution(
+    results: dict,
+    stimuli=("drifting_gratings", "static_gratings", "natural_scenes"),
+    figsize=(12, 3),
+    bins: int = 25,
+    r2_range=(-0.5, 1.0),
+) -> plt.Figure:
+    """Histogram of gain-model R² for modulated neurons, per stimulus.
+
+    Only neurons flagged as modulated (``modulated_mask``) with a valid gain
+    fit are included.  The gain-model R² (``gain_r2``) measures how well the
+    linear relationship ``R_run ≈ a·R_still + b`` describes each cell's
+    running modulation — 1 = perfect linear fit, 0 = no better than the mean.
+
+    Parameters
+    ----------
+    results : dict
+        Mapping stimulus -> :class:`BinaryModulation` instance
+        (``fit_gain_model`` must have been run).
+    stimuli : tuple of str, optional
+        Which stimuli to plot.  Defaults to the three visually evoked stimuli.
+    figsize : tuple, optional
+        Figure dimensions, by default ``(12, 3)``.
+    bins : int, optional
+        Number of histogram bins, by default 25.
+    r2_range : tuple, optional
+        ``(low, high)`` histogram range.  Defaults to ``(-0.5, 1.0)``.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    n_stim = len(stimuli)
+    fig, axes = plt.subplots(1, n_stim, figsize=figsize, constrained_layout=True,
+                             sharey=True, sharex=True)
+    if n_stim == 1:
+        axes = np.atleast_1d(axes)
+
+    for ax, stimulus in zip(axes, stimuli):
+        analysis = results[stimulus]
+        mod = np.asarray(analysis.modulated_mask, dtype=bool)
+        valid = np.asarray(analysis.gain_valid, dtype=bool)
+        r2 = np.asarray(analysis.gain_r2, dtype=float)
+
+        vals = r2[valid & mod]
+        n_mod = int(vals.size)
+        if n_mod > 0:
+            ax.hist(vals, bins=bins, range=r2_range, alpha=0.7, color="C0")
+            med = np.nanmedian(vals)
+            ax.axvline(med, linestyle="--", color="C0", linewidth=1.5,
+                       label=f"median={med:.3f}")
+
+        ax.set_title(f"{stim_to_short(stimulus)}\n(n={n_mod})", fontweight="bold")
+        ax.set_xlabel("Gain R²", fontweight="bold", fontsize=12)
+        ax.axvline(0, linestyle=":", color="gray", alpha=0.5)
+        if n_mod > 0:
+            ax.legend(frameon=False, fontsize=9)
+
+    axes[0].set_ylabel("Number of cells", fontweight="bold")
+    return fig
+
+
 def plot_metadata_validation(aligned: dict, validation_df: pd.DataFrame = None, ylabel: str = "Sign-safe MI (ours)"):
     """Scatter our MI against Allen ``run_mod_*`` metadata, per stimulus.
 

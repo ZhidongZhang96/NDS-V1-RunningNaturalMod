@@ -85,5 +85,5 @@ All three analysis classes are **implemented** on this integration branch (`Spee
 
 ## Development
 
-- Branch: `dev` (work in progress), `master` (stable)
+- Branch: `dev` (work in progress), `main` (stable)
 - Notebook auto-reloads utils via `%autoreload 2`
