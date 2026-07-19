@@ -1737,7 +1737,7 @@ def plot_modulated_venn(modulated_mask: dict[str, np.ndarray],
         all_mod |= s
     n_total = len(next(iter(modulated_mask.values())))
     outside = n_total - len(all_mod)
-    ax.text(2.30, -1.9, f'Not modulated\n{outside}',
+    ax.text(2.30, 1, f'Not\nmodulated\n{outside}',
             ha='center', va='center', fontsize=10, fontweight='bold', color='#666666')
 
     ax.set_xlim(-2.6, 2.8)
@@ -1802,7 +1802,7 @@ def plot_monotonicity_stacked_bar(tunings: dict[str, SpeedTuning],
                edgecolor='gray', linewidth=0.6, label='modulated', zorder=0)
         for i in range(len(labels)):
             ax.text(i, mod_counts[i] + 0.5, str(int(mod_counts[i])),
-                    ha='center', va='bottom', fontsize=9, color='gray',
+                    ha='center', va='bottom', fontsize=12, color='gray',
                     fontweight='bold')
         ax.margins(y=0.1)
 
@@ -1850,12 +1850,12 @@ def plot_monotonicity_stacked_bar(tunings: dict[str, SpeedTuning],
             if v > 0:
                 y_mid = y_offset + v / 2
                 ax.text(i, y_mid, f'{int(v)}', ha='center', va='center',
-                        fontsize=8, color='white', fontweight='bold')
+                        fontsize=10, color='white', fontweight='bold')
             y_offset += v
 
     ax.set_xticks(x)
-    ax.set_xticklabels([stim_to_short(l) for l in labels])
-    ax.set_ylabel('# neurons')
+    ax.set_xticklabels([stim_to_short(l) for l in labels], fontweight='bold')
+    ax.set_ylabel('# of neurons')
     ax.legend(fontsize=9)
     return ax
 
@@ -2115,6 +2115,7 @@ def plot_monotonicity_grid(tunings: dict[str, SpeedTuning],
 def plot_modulated_tuned_grid(
     tunings: dict[str, SpeedTuning],
     modulated_mask: dict[str, np.ndarray],
+    n_cells: int | None = None,
     figsize=(6, 10),
 ) -> plt.Figure:
     """Grid map combining BinaryModulation and SpeedTuning results.
@@ -2133,6 +2134,9 @@ def plot_modulated_tuned_grid(
     modulated_mask : dict[str, np.ndarray]
         Per-stimulus boolean masks ``(n_cells,)`` for running-modulated cells
         (e.g. from :attr:`BinaryModulation.tuned_mask`).
+    n_cells : int or None
+        If set, only show the top N modulated neurons (sorted by mean |ρ|).
+        If None (default), show all modulated neurons.
     figsize : tuple
         Figure size.
 
@@ -2213,6 +2217,8 @@ def plot_modulated_tuned_grid(
 
     # Only plot modulated neurons (modulated in at least one stimulus)
     order = order[modulated_any[order]]
+    if n_cells is not None:
+        order = order[:n_cells]
     I_mod = len(order)
 
     mod_mask = mod_mask[order]
@@ -2262,19 +2268,22 @@ def plot_modulated_tuned_grid(
     blank = Line2D([], [], color='none', marker='none', linestyle='')
     spearman_header = Line2D([], [], color='none', marker='none', linestyle='')
     legend_handles = [
-        Patch(facecolor=MOD_BG, label='modulated (BinaryMod.)'),
         spearman_header,
-        Patch(facecolor=COLS['positive'], label='positive'),
-        Patch(facecolor=COLS['negative'], label='negative'),
-        Patch(facecolor=COLS['non-monotonic'], label='non-monotonic'),
+        Patch(facecolor=COLS['positive']),
+        Patch(facecolor=COLS['negative']),
+        Patch(facecolor=COLS['non-monotonic']),
+        blank,
+        Patch(facecolor=MOD_BG),
+        blank,
+        blank,
+        blank,
     ]
-    # significance stars
-    legend_handles.extend([blank, blank, blank])
     legend_labels = [
-        'modulated (BinaryMod.)',
         'Spearman $\\rho$',
         'positive', 'negative', 'non-monotonic',
-        'p\u2264.01 *',  'p\u2264.001 **', 'p\u2264.0001 ***',
+        '',
+        'modulated',
+        'p\u2264.01 *',   'p\u2264.001 **', 'p\u2264.0001 ***',
     ]
     ax.legend(legend_handles, legend_labels,
               loc='upper left', bbox_to_anchor=(1.02, 1), fontsize=9, frameon=False)
@@ -2772,8 +2781,9 @@ class BinaryModulation:
 
         if valid.sum() > 0:
             _add_identity_line(ax, x[valid], y[valid], label="Run = still")
-        ax.set_xlabel("Mean response during still trials")
-        ax.set_ylabel("Mean response during running trials")
+        ax.set_xlabel("$R_{\\text{still, c}}$", fontsize=12)
+        ax.set_ylabel("$R_{\\text{run, c}}$", fontsize=12)
+        # ax.set_ylabel("Mean response during running trials")
         ax.set_title(f"{self._td.stimulus}: cell {cell} (n={valid.sum()} conditions)")
         ax.legend(frameon=False)
         return fig
@@ -3123,7 +3133,7 @@ def plot_metric_comparison(
     if ax is None:
         fig, axes = plt.subplots(
             2,2, figsize=(8, 6),
-            sharey=True, constrained_layout=True,
+            sharey=True, constrained_layout=True, sharex=True,
         )
         axes = axes.flatten()
     else:
@@ -3160,17 +3170,17 @@ def plot_metric_comparison(
                     panel.axvline(
                         sub_median, linestyle="--", color="C3",
                         linewidth=1.5,
-                        label=f"masked median = {sub_median:+.3f}",
+                        label=f"modulated median = {sub_median:+.3f}",
                     )
 
         if value_range is not None:
             panel.set_xlim(*value_range)
         if neurons_mask:
-            panel.set_title(f"{stim_to_short(stimulus)} (n={int(neurons_mask[stimulus].sum())}/{int(finite.sum())})")
+            panel.set_title(f"{stim_to_short(stimulus)} (n={int(neurons_mask[stimulus].sum())}/{int(finite.sum())})", fontweight='bold')
         else:
             panel.set_title(f"{stim_to_short(stimulus)} (n={int(finite.sum())})")
-        panel.set_xlabel(metric)
-        panel.legend(frameon=False, fontsize=8)
+        # panel.set_xlabel(metric)
+        panel.legend(frameon=False, fontsize=10)
 
     axes[0].set_ylabel("Number of cells")
     return fig, axes
@@ -3287,10 +3297,10 @@ def plot_gain_scatter(
         ax.axvline(1, linestyle=":", color="gray")
         n_shown = int(mask.sum())
         base_n = int((mod & valid).sum())
-        title = f"{stim_to_short(stimulus)}\n{n_shown} / {base_n} modulated"
-        ax.set_title(title)
-        ax.set_xlabel("a (multiplicative)")
-        ax.set_ylabel("b (additive)")
+        title = f"{stim_to_short(stimulus)} ({n_shown} / {base_n})"
+        ax.set_title(title, fontweight='bold')
+        ax.set_xlabel("a", fontweight='bold',fontsize=12)
+        ax.set_ylabel("b", fontweight='bold',fontsize=12)
 
     return fig
 
