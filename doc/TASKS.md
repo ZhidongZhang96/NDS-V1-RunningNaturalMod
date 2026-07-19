@@ -29,6 +29,13 @@ Two published repos are near-exact references for our analyses. **Both are grati
 - `Code/do_regression_ss.m` L120–198 — nested-model list + 5-fold CV + `rsquared()` = `1 − SS_res/SS_tot`.
 - ⚠️ Stimulus model is 100% parametric gratings (direction/SF/phase/speed); data ingest is hard-filtered to `drifting_gratings`. **No natural-image code path exists** — only its stimulus-agnostic scaffolding (tent basis, nuisance regressors, gain-model machinery) transfers.
 
+> ⚠️ **Cohort caveat (area).** The bundled `data/visual_coding_data.npz` (47 matched cells) is Allen
+> container **`511510753` = VISpm**, a higher visual area — **not V1/VISp** — although the layer/line are
+> as intended (Cux2-CreERT2, L2/3–4). Per-stimulus counts below (e.g. "17/47") are therefore the **VISpm**
+> cohort. Genuine **V1** results (Analysis 3's headline) use a pooled 3-container VISp cohort
+> (`511507650`/`511509529`/`511510650`, n=363) built via `scripts/download_container.py` + `load_containers`.
+> Whether to rebuild the bundled data on V1 is an open team decision — see [`TEAM_NOTE.md`](TEAM_NOTE.md).
+
 ## Already done — do NOT rebuild
 
 `load_data()` L16–47 · `extract_trials()` L152–240 (parameterized `response_window=(offset,duration)`, handles spontaneous; keeps stimuli separate) · `TrialData` L123–149 · `Plotter` L248–448 · `get_condition_intervals()` L70–115. All three analyses consume the same `TrialData`, so they are independent.
@@ -50,7 +57,7 @@ Two published repos are near-exact references for our analyses. **Both are grati
 
 Owns `utils.py` L476–791 + the Phase-0 reducers. (Note: actual implementation grew beyond the initially planned L456–551 range, adding plotting and comparison functions.)
 - [x] **A1** `compute_tuning(n_bins=20)` (L634–652) → `bin_centers`, `mean_responses`, `std_responses`. Also implements `_binned_responses()`, `_subsample()` for handling unbalanced speed distribution.
-- [x] **A2** `significance_test(n_shuffles=1000)` (L655–696) → `p_values`, `significant_mask` (shuffle speed labels, re-compute tuning, **Levene** observed-vs-shuffled per cell, `p<0.05`).
+- [x] **A2** `significance_test(threshold=0.05)` → `anova_p_values`, `significant_mask` (one-way **ANOVA** `scipy.stats.f_oneway` across the ≤20 speed bins per cell, `p<0.05`). *Implemented as ANOVA across bins, not the originally planned shuffle/Levene test; the stored attribute was renamed `levene_p_values`→`anova_p_values` to match.*
 - [x] **A3** `compute_spearman()` (L699–736) → `rho`, `rho_p_values` (`scipy.stats.spearmanr`). Also categorizes monotonicity (positive/negative/non-monotonic) with `rho_threshold` and `p_threshold` parameters.
 - [x] **A4** `plot_tuning_curve(cells=None)` (L741–777) — average ± SEM over given cells or all cells.
 - [x] **A5** `print_tuned_cells()` (L779–791) — prints counts and ρ values per monotonicity category. Replaces the originally planned `plot_significant_neurons()`.
@@ -58,7 +65,7 @@ Owns `utils.py` L476–791 + the Phase-0 reducers. (Note: actual implementation 
 
 **Done when:** per-stimulus significant-tuned fraction produced; sign of `rho` broadly agrees with `neurons_metadata.csv` responsiveness (`p_dg/p_sg/p_ns`).
 
-**Status: DONE → [SpeedTuning.md](SpeedTuning.md)**
+**Status: DONE → [Modulation&Tuning.md](Modulation&Tuning.md)**
 
 ---
 
@@ -66,7 +73,7 @@ Owns `utils.py` L476–791 + the Phase-0 reducers. (Note: actual implementation 
 
 Owns `utils.py` L559–661 + cross-cutting deliverables.
 - [ ] **B1** `classify_trials(run_threshold=3.0, still_threshold=0.5)` (L592–613) → run/still/ignored masks (running `mean>3 & all>0.5`; still `mean<0.5 & all<3`). Note: on ~7-frame sg/ns trials the "all-frames" guards are near-inert (speed ≈ constant within 0.23 s) — see "Grating vs Natural".
-- [ ] **B2** `compute_mi()` (L615–628) → `mi = (R_run−R_still)/(R_run+R_still)` per cell (**our** formula, not 2×).
+- [ ] **B2** `compute_mi()` → sign-safe `mi = (R_run−R_still)/(|R_run|+|R_still|+ε)` per cell (**implemented** with an absolute-value denominator, bounding `mi∈[−1,1]` and keeping `sign(mi)=sign(R_run−R_still)` on signed ΔF/F; the plain `(R_run−R_still)/(R_run+R_still)` form lives in `others/mi_audit_utils.py` for the metric audit).
 - [ ] **B3** `fit_gain_model()` (L630–640) → `gain_a`, `gain_b`. **Gotcha:** fit `R_run = a·R_still + b` **across stimulus conditions** (one (still, run) point per orientation / image / SF), not from a single scalar pair. For ns the conditioning variable is image identity (`frame`, blank excluded). Document the choice.
 - [ ] **B4/B5** `plot_scatter(cell=None)` (L644–653) with fit line; `plot_mi_histogram()` (L655–661) with median.
 - [ ] **B6** Cross-stimulus comparison (**the headline result**): compute MI for all four, then frame the key contrast as **gratings (dg + sg) vs natural (ns)**, with **spontaneous** as the no-stimulus baseline — this is the grating-vs-natural question the project exists to answer. Report dg and sg individually too. State the comparability caveats (below). Literature anchor: running ≈ **1.9× median evoked increase, ~13% of cells significantly modulated** (de Vries 2020, gratings); whether the natural-scenes MI distribution differs from gratings has **no published precedent** — it is the project's novel result ([`REFERENCES.md`](REFERENCES.md)).

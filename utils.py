@@ -803,7 +803,7 @@ class SpeedTuning:
         self.std_responses: np.ndarray | None = None         # (n_bins,)
 
         # by significance_test()
-        self.levene_p_values: np.ndarray | None = None       # (n_cells_picked,)
+        self.anova_p_values: np.ndarray | None = None       # (n_cells_picked,)
         self.significant_mask: np.ndarray | None = None      # bool, (n_cells_picked,)
 
         # by compute_spearman()
@@ -1000,7 +1000,7 @@ class SpeedTuning:
 
         Stores
         ------
-        levene_p_values : np.ndarray, shape ``(n_cells_picked,)``
+        anova_p_values : np.ndarray, shape ``(n_cells_picked,)``
             p-values from one-way ANOVA across speed bins.
         significant_mask : np.ndarray of bool, shape ``(n_cells_picked,)``
             True where p < threshold.
@@ -1037,7 +1037,7 @@ class SpeedTuning:
         significant_mask = p_values < threshold
         significant_mask[np.isnan(p_values)] = False
 
-        self.levene_p_values = p_values
+        self.anova_p_values = p_values
         self.significant_mask = significant_mask
 
     def compute_spearman(self, rho_threshold=0, p_threshold = 0.05):
@@ -1952,7 +1952,7 @@ def plot_monotonicity_grid(tunings: dict[str, SpeedTuning],
         assert t.rho is not None, "call compute_spearman() first"
         assert t.significant_mask is not None, "call significance_test() first"
         assert t.monotonic_mask is not None, "call compute_spearman() first"
-        assert t.levene_p_values is not None, "call significance_test() first"
+        assert t.anova_p_values is not None, "call significance_test() first"
 
     DARK_GRAY = (0.3, 0.3, 0.3)
 
@@ -2043,7 +2043,7 @@ def plot_monotonicity_grid(tunings: dict[str, SpeedTuning],
                 else:
                     col = COLS['non-monotonic']
                 txt = f'{t.rho[ci]:.3f}'.replace('0.', '.', 1)
-                p = t.levene_p_values[ci]
+                p = t.anova_p_values[ci]
                 ax.text(j, i, txt, ha='center', va='center',
                         fontsize=8, color=col, fontweight='bold')
                 stars = _pvalue_stars(p)
@@ -2145,7 +2145,7 @@ def plot_modulated_tuned_grid(
         assert t.rho is not None, "call compute_spearman() first"
         assert t.significant_mask is not None, "call significance_test() first"
         assert t.monotonic_mask is not None, "call compute_spearman() first"
-        assert t.levene_p_values is not None, "call significance_test() first"
+        assert t.anova_p_values is not None, "call significance_test() first"
 
     MOD_BG = (0.9, 0.9, 0.9)    # light gray for modulated
 
@@ -2167,7 +2167,7 @@ def plot_modulated_tuned_grid(
             sig = np.zeros(I, dtype=bool)
             sig[nm] = t.significant_mask
             lev = np.full(I, np.nan)
-            lev[nm] = t.levene_p_values
+            lev[nm] = t.anova_p_values
             mono = {}
             for k in ('positive', 'negative', 'non-monotonic'):
                 m = np.zeros(I, dtype=bool)
@@ -2177,7 +2177,7 @@ def plot_modulated_tuned_grid(
             # All cells used (e.g., spontaneous with neuron_mask=None)
             rho = t.rho.copy()
             sig = t.significant_mask.copy()
-            lev = t.levene_p_values.copy()
+            lev = t.anova_p_values.copy()
             mono = {k: v.copy() for k, v in t.monotonic_mask.items()}
         expanded[lbl] = {'rho': rho, 'sig': sig, 'lev': lev, 'mono': mono}
 

@@ -12,11 +12,13 @@ It has been shown that layer 2/3 and 4 neurons in mouse V1 are positively modula
 
 We focus on how running speed modulates response amplitude, via three analyses (see [`Plan.md`](doc/Plan.md) for the full math):
 
-1. **Binned speed tuning** — bin running speed, build per-neuron tuning curves, test significance against shuffles (Levene), and quantify monotonicity with Spearman's ρ.
-2. **Binary running/still conditions** — split trials into *running* vs *still*, compute a Modulation Index `MI = (R_run − R_still) / (R_run + R_still)`, and fit a gain model `R_run = a·R_still + b` (a = multiplicative, b = additive).
-3. **Predictive encoding models** — nested linear models (Null / Add-only / Mult-only / Full) with a tent-basis drifting baseline, compared via ΔR².
+1. **Binned speed tuning** — bin running speed, build per-neuron tuning curves, test significance with a one-way ANOVA across speed bins, and quantify monotonicity with Spearman's ρ.
+2. **Binary running/still conditions** — split trials into *running* vs *still*, compute a sign-safe Modulation Index `MI = (R_run − R_still) / (|R_run| + |R_still| + ε)`, and fit a gain model `R_run = a·R_still + b` (a = multiplicative, b = additive).
+3. **Predictive encoding models** — nested ridge-regularized linear models (Null / Add-only / Mult-only / Full) with a tent-basis drifting baseline, compared via cross-validated ΔR² (blocked/purged CV).
 
-> **Status:** data loading, trial extraction, and overview plotting are implemented in [`utils.py`](utils.py); the three analysis classes are scaffolded as stubs (`raise NotImplementedError`) to be filled in following `Plan.md`.
+> **Status:** all three analyses are implemented in [`utils.py`](utils.py) — `SpeedTuning` (Analysis 1) and `BinaryModulation` (Analysis 2) came from the `dev` line; `EncodingModel` (Analysis 3) plus `tests/test_encoding.py` and the `scripts/` pipeline came from the `encoding-model` line. This branch is their integration (all three runnable end-to-end). Reports: [`doc/Modulation&Tuning.md`](doc/Modulation&Tuning.md) (Analyses 1–2), [`doc/EncodingModel.md`](doc/EncodingModel.md) (Analysis 3).
+>
+> ⚠️ **Cohort caveat (area).** The bundled 47-cell cohort (`data/visual_coding_data.npz`) is Allen container **`511510753` = VISpm**, a higher visual area — *not* V1/VISp — though the layer/line are as intended (Cux2-CreERT2, L2/3–4). Genuine **V1** results use a pooled 3-container VISp cohort (n=363) built via `scripts/download_container.py`. See [`doc/TEAM_NOTE.md`](doc/TEAM_NOTE.md).
 
 ## Repository layout
 

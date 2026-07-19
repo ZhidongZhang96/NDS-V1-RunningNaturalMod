@@ -8,7 +8,10 @@ import numpy as np, matplotlib.pyplot as plt
 
 os.makedirs("doc/figures", exist_ok=True)
 STIM = ["drifting\ngratings", "static\ngratings", "natural\nscenes"]
-# events (spike-comparable) medians
+# events (spike-comparable) medians — [dg, sg, ns].
+# These are transcribed from the printed output of `python scripts/compute_v1_metrics.py`
+# (V1 pooled n=363) and the VISpm 47-cell run; re-run that script and update these four
+# lists if the cohort or loader semantics change (this figure is not driven by a committed .npz).
 V1_ratio = [1.57, 1.72, 2.15];   VISpm_ratio = [1.04, 1.04, 1.10]
 V1_gain  = [0.34, 0.47, 0.77];   VISpm_gain  = [0.08, 0.09, 0.36]
 C_V1, C_PM = "#C44E52", "#4C72B0"

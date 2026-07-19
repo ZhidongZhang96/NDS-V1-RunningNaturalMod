@@ -1,6 +1,8 @@
 
 The research question:  It has been shown that Layer 2/3 and 4 neurons in mice V1 are positively modulated by local motion during the visual responsiveness task, specifically in drifting grating. Through the Allen dataset, we want to verify whether those modulations are present in the same grating task and how different they are under naturalistic stimuli.
 
+> ⚠️ **Cohort caveat (area).** This plan (and the bundled 47-cell `visual_coding_data.npz`) says "V1", but that cohort is Allen container `511510753` = **VISpm** (a higher visual area), not V1/VISp — layer/line are as intended (Cux2-CreERT2, L2/3–4). Genuine V1 results use a pooled 3-container VISp cohort (n=363). See [`TEAM_NOTE.md`](TEAM_NOTE.md). Also note the implementation diverges from this plan in places (e.g. the tuning significance test is a one-way ANOVA across speed bins, not the Levene/shuffle test written below).
+
 Specifically, we want to focus on the modualation of running speed on the response amplitude, and compare the results of `drifting_gratings`, `static_gratings` and `natural_scenes`. It also contains the comparison to trials without stimuli, i.e., `spontaneous`
 
 1. Pre-processing

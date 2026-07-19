@@ -11,6 +11,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Research Question
 How does running speed modulate V1 neuron responses, and how does this modulation differ across stimulus types (`drifting_gratings`, `static_gratings`, `natural_scenes`) and compared to spontaneous activity?
 
+> ⚠️ **Cohort caveat (area).** The bundled `data/visual_coding_data.npz` (47 matched cells) is Allen container **`511510753` = VISpm** (a higher visual area), *not* V1/VISp — the layer/line are as intended (Cux2-CreERT2, L2/3–4). Genuine V1 results (Analysis 3's headline) use a pooled 3-container VISp cohort (`511507650`/`511509529`/`511510650`, n=363) built via `scripts/download_container.py` + `load_containers`. Rebuilding the bundled data on V1 is an open team decision — see [`doc/TEAM_NOTE.md`](doc/TEAM_NOTE.md).
+
 ## Environment Setup
 
 The project runs in a conda environment named `allensdk` (Python **3.10**). See [README.md](README.md) for the full walkthrough. Quickest path:
@@ -33,7 +35,7 @@ Critical, non-obvious constraints (do not "simplify" these away):
 - Main analysis: open `visual_coding.ipynb` and select the `allensdk` kernel.
 - **The main notebook needs `visual_coding_data.npz`**, loaded via `load_data(path="../data")` — i.e. a `data/` directory *beside* the repo. This file is git-ignored and **not in the repo**; it must be supplied separately before the notebook can run end-to-end.
 - `allensdk.ipynb` pulls cell metadata from the Allen SDK using the local `boc/manifest.json` cache and runs without the `.npz`.
-- There is no test suite, linter config, or build step in this repo; "running" means executing the notebooks.
+- Tests: `tests/test_encoding.py` covers the `EncodingModel` (design matrices, tent basis, blocked CV) and runs on a synthetic fixture (no `.npz` needed): `python -m pytest tests/test_encoding.py`. There is no linter config or build step; otherwise "running" means executing the notebooks or the `scripts/` pipeline.
 
 ## Project Structure
 
@@ -57,19 +59,18 @@ Data (`visual_coding_data.npz`) lives outside the repo in `../data/` and is not 
 - **`Plotter`** — Raw data summary plots (FOV, traces, running speed). Accepts `data` dict
 - **`TrialData`** — Dataclass holding extracted trial arrays `(n_trials, n_cells, len_window)`. Does NOT store averages — each analysis class averages as needed
 - **`extract_trials()`** — Shared pre-processing: slices ΔF/F and running speed at stim table intervals. Returns `TrialData`. For `stimulus="spontaneous"`, epochs are sourced from `stim_epoch_table` and sliced into fixed-duration windows
-- **`SpeedTuning`** — Analysis 1: bin running speed → tuning curve → shuffle test → Spearman
-- **`BinaryModulation`** — Analysis 2: running/still classification → MI → gain model
-- **`EncodingModel`** — Analysis 3: nested linear models (null/add/mult/full) → R² decomposition
+- **`SpeedTuning`** — Analysis 1: bin running speed → tuning curve → one-way ANOVA across bins → Spearman (monotonicity)
+- **`BinaryModulation`** — Analysis 2: running/still classification → sign-safe MI → condition-level gain model
+- **`EncodingModel`** — Analysis 3: nested ridge models (null/add/mult/full) → cross-validated (blocked/purged) ΔR² decomposition
 
-The three analysis classes are currently **stubs** — their `compute_*`/`fit_*`/`plot_*` methods `raise NotImplementedError`. The data-loading, `extract_trials`, and `Plotter` code is implemented. `Plan.md` holds the math each stub should implement.
+All three analysis classes are **implemented** on this integration branch (`SpeedTuning` + `BinaryModulation` from `dev`; `EncodingModel` + `tests/` + `scripts/` from `encoding-model`). The data-loading, `extract_trials`, and `Plotter` code is also implemented. `Plan.md` holds the intended math; the reports in `doc/` describe what was actually implemented (which diverges from the plan in places — e.g. ANOVA rather than a shuffle/Levene test).
 
 ### Conventions
 
 - Analysis classes store input as `self._td`, compute results into `self.xxx` attributes
 - Plotting methods read stored results, do not re-compute
 - Each analysis class can be applied to any stimulus type via identical `TrialData` interface
-- Non-implemented methods raise `NotImplementedError` (stubs in place)
-- `extract_trials()` takes `response_window=(offset, duration)` for stimulus-specific response windows
+- `extract_trials()` takes `response_window=(offset, duration)` for stimulus-specific response windows; `response_window=None` uses the per-stimulus defaults in the module-level `RESPONSE_WINDOWS` dict
 
 ### Stimulus × Session Mapping
 
