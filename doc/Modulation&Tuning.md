@@ -2,7 +2,7 @@
 
 ## 1 Running Modulation
 
-We classify ...
+
 
 A neuron is *modulated by running* if ...
 
@@ -46,3 +46,29 @@ MI of V1 pool: on population level, MI distribution of SG and NS is more positiv
 
 
 ...
+
+
+
+> DG suffers from rare trials number, making its statistical test less reliable.
+
+Story: starts from Modulation, (1) dive into speed tuing (2) develop better gain model
+
+- \# of modulated neurons
+    - V1: few for Spont
+    - VISpm: more modulated neurons at Spont -> *pure running modulation*
+- MI
+    - V1: SG, NS **positive**; DG SHIT, Spont flat (no clear modulation)
+    - VISpm: not clear pattern
+- Gain model: not good, to be studied with better models
+- Tuning
+    - show the \# of tuned neurons, their tuning curve by monotonicity, and the detailed profiles
+    - Both V1 and VISpm supports that, the speed tuning of the same neurons are shown to be stimuli-dependent. 
+
+Overall, we find positive modualtion by running in SG and NS, not in Spont and DG (rare data), emboding in the right-deviated distribution. When it comes to the speed tuning, individual neurons' tuning vary across stimuli. 
+
+
+Multiplicative term is bad in encoding model
+
+CV makes the model more roboust
+
+
