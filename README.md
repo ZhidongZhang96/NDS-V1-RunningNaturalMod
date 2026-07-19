@@ -16,22 +16,22 @@ We focus on how running speed modulates response amplitude, via three analyses (
 2. **Binary running/still conditions** — split trials into *running* vs *still*, compute a sign-safe Modulation Index `MI = (R_run − R_still) / (|R_run| + |R_still| + ε)`, and fit a gain model `R_run = a·R_still + b` (a = multiplicative, b = additive).
 3. **Predictive encoding models** — nested ridge-regularized linear models (Null / Add-only / Mult-only / Full) with a tent-basis drifting baseline, compared via cross-validated ΔR² (blocked/purged CV).
 
-> **Status:** all three analyses are implemented in [`utils.py`](utils.py) — `SpeedTuning` (Analysis 1) and `BinaryModulation` (Analysis 2) came from the `dev` line; `EncodingModel` (Analysis 3) plus `tests/test_encoding.py` and the `scripts/` pipeline came from the `encoding-model` line. This branch is their integration (all three runnable end-to-end). Reports: [`doc/Modulation&Tuning.md`](doc/Modulation&Tuning.md) (Analyses 1–2), [`doc/EncodingModel.md`](doc/EncodingModel.md) (Analysis 3).
+> **Status:** all three analyses are implemented in [`utils.py`](utils.py): `SpeedTuning` (Analysis 1) and `BinaryModulation` (Analysis 2) came from the `dev` line; `EncodingModel` (Analysis 3) plus `tests/test_encoding.py` and the `scripts/` pipeline came from the `encoding-model` line. This branch is their integration (all three runnable end-to-end). Reports: [`doc/Modulation&Tuning.md`](doc/Modulation&Tuning.md) (Analyses 1–2), [`doc/EncodingModel.md`](doc/EncodingModel.md) (Analysis 3).
 >
-> ⚠️ **Cohort caveat (area).** The bundled 47-cell cohort (`data/visual_coding_data.npz`) is Allen container **`511510753` = VISpm**, a higher visual area — *not* V1/VISp — though the layer/line are as intended (Cux2-CreERT2, L2/3–4). Genuine **V1** results use a pooled 3-container VISp cohort built via `scripts/download_container.py`. See [`doc/EncodingModel.md`](doc/EncodingModel.md) §9.
+> ⚠️ **Cohort caveat (area).** The bundled 47-cell cohort (`data/visual_coding_data.npz`) is Allen container **`511510753` = VISpm**, a higher visual area, *not* V1/VISp, though the layer/line are as intended (Cux2-CreERT2, L2/3–4). **V1** results use a pooled 3-container VISp cohort built via `scripts/download_container.py`. See [`doc/EncodingModel.md`](doc/EncodingModel.md) §9.
 
 ## Repository layout
 
 ```
 NDS-V1-RunningNaturalMod/
 ├── utils.py                  # Shared code: load_data, extract_trials, TrialData, Plotter + the 3 analysis classes
-├── Unified_V1_demo.ipynb     # ⭐ Start here — one notebook demoing all 3 analyses (V1 spotlight)
+├── Unified_V1_demo.ipynb     # ⭐ Start here: demos of all 3 analyses (V1)
 ├── visual_coding.ipynb       # Data tour + trial-extraction walkthrough
 ├── Session B&A*.ipynb        # Detailed Analyses 1 & 2 (speed tuning + running modulation), incl. V1 pooling
 ├── EncodingModel_demo.ipynb  # Detailed Analysis 3 (encoding model, two-metric result)
 ├── allensdk.ipynb            # Supplementary: pull per-cell metadata via the Allen SDK
 ├── scripts/                  # Reproducibility pipeline (fetch data, fit, robustness battery, render figures)
-├── tests/                    # test_encoding.py — EncodingModel unit tests (synthetic fixture, no data needed)
+├── tests/                    # test_encoding.py, EncodingModel unit tests (synthetic fixture, no data needed)
 ├── doc/                      # Reports + analysis plan (see "Docs worth reading"); figures under doc/figures/
 ├── data/                     # Bundled data + committed result caches (see note below)
 ├── boc/                      # Allen SDK cache manifest + stimulus mappings
@@ -44,19 +44,19 @@ NDS-V1-RunningNaturalMod/
 
 | Notebook | What it demonstrates |
 |---|---|
-| [`Unified_V1_demo.ipynb`](Unified_V1_demo.ipynb) | ⭐ **Start here.** One executed notebook with the key result of all three analyses — **V1 as the headline**, VISpm as a control. |
+| [`Unified_V1_demo.ipynb`](Unified_V1_demo.ipynb) | ⭐ **Start here.** One executed notebook with the key result of all three analyses, with **V1 as the main population**, VISpm as a control. |
 | [`visual_coding.ipynb`](visual_coding.ipynb) | Data tour + preprocessing: how trials are extracted from the Allen `.npz`. |
 | [`Session B&A.ipynb`](Session%20B%26A.ipynb) & [`Session B&A for V1_all.ipynb`](Session%20B%26A%20for%20V1_all.ipynb) | Full **Analyses 1 & 2** (speed tuning + binary running modulation), including the pooled-V1 run. |
 | [`EncodingModel_demo.ipynb`](EncodingModel_demo.ipynb) | Full **Analysis 3** (nested encoding model, ΔR² decomposition, two-metric result). |
-| [`allensdk.ipynb`](allensdk.ipynb) | Supplementary — pulls per-cell Allen metadata (tuning, reliability, run-modulation, RFs). |
+| [`allensdk.ipynb`](allensdk.ipynb) | Supplementary: pulls per-cell Allen metadata (tuning, reliability, run-modulation, RFs). |
 
 ### Docs worth reading
 
 | Doc | What it covers |
 |---|---|
 | [`doc/Plan.md`](doc/Plan.md) | The analysis plan with the full math for all three analyses. |
-| [`doc/Modulation&Tuning.md`](doc/Modulation%26Tuning.md) | **Analyses 1 & 2** report — speed-tuning and running-modulation results. |
-| [`doc/EncodingModel.md`](doc/EncodingModel.md) | **Analysis 3** report — the two-metric V1 result, the CV-leakage fix, and area-specificity. |
+| [`doc/Modulation&Tuning.md`](doc/Modulation%26Tuning.md) | **Analyses 1 & 2** report: speed-tuning and running-modulation results. |
+| [`doc/EncodingModel.md`](doc/EncodingModel.md) | **Analysis 3** report: the two-metric V1 result, the CV-leakage fix, and area-specificity. |
 | [`doc/REFERENCES.md`](doc/REFERENCES.md) | Literature map (cite-X-for-Y) behind the methods and findings. |
 
 > **`data/`** holds the bundled `visual_coding_data.npz` (the VISpm 47-cell cohort) + `neurons_metadata.csv`, plus the committed encoding-model result caches (`encoding_*.npz`, `robust_null.npz`). The large per-container V1 session dumps (`container_*.npz`, ~0.6 GB each) are **fetched on demand** via `scripts/download_container.py` and are git-ignored — `Unified_V1_demo.ipynb`'s setup cell prints the exact command if they're missing.
@@ -100,7 +100,7 @@ The main notebook loads `visual_coding_data.npz` via `load_data(path="../data")`
 parent/
 ├── NDS-V1-RunningNaturalMod/   # this repo
 └── data/
-    └── visual_coding_data.npz  # NOT included in the repo — obtain separately
+    └── visual_coding_data.npz  # NOT included in the repo, obtain separately
 ```
 
 This `.npz` is git-ignored and must be supplied separately. The supplementary [`allensdk.ipynb`](allensdk.ipynb) does **not** need it — it reads cell metadata via the Allen SDK using the local `boc/` cache.
@@ -113,9 +113,7 @@ jupyter lab            # or: jupyter notebook
 
 Open [`visual_coding.ipynb`](visual_coding.ipynb) and select the **"Python (allensdk — NDS Visual Coding)"** kernel.
 
-## Environment notes / gotchas
-
-These are deliberate and load-bearing — don't "simplify" them away:
+## Environment notes
 
 - **Python must be ≥ 3.10** (not 3.9): `utils.py` uses `str | None` runtime unions in the `TrialData` dataclass.
 - **`setuptools` is pinned `< 81`**: AllenSDK still imports `pkg_resources`, which newer setuptools removed.

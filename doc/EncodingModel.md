@@ -1,4 +1,4 @@
-# EncodingModel (Analysis 3) — Running Modulation of Mouse V1, by Two Metrics
+# EncodingModel (Analysis 3) — Running Modulation of Mouse V1 by 2 Metrics
 
 Analysis of running-speed modulation of mouse **V1 (VISp)** visual responses with a nested
 linear encoding model (`EncodingModel`, `utils.py`), across `drifting_gratings` (dg),
