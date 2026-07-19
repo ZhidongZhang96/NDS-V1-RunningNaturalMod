@@ -78,22 +78,20 @@ Owns `utils.py` L559–661 + cross-cutting deliverables.
 
 ---
 
-## Person C — Analysis 3: `EncodingModel` (heavy, reference-faithful, decomposed)
+## Person C — Analysis 3: `EncodingModel` — ✅ DONE (C1–C8)
 
-Owns `utils.py` L669–741. Port V1Locomotion's *machinery*; use B's CV splitter + plot helper.
-- [ ] **C1** Tent basis — port `tent_basis.m` to `tent_basis(x, centers)`; unit-test vs hand values.
-- [ ] **C2** Stimulus design `f(S)` — **gratings vs natural differ fundamentally, and neither reference repo helps here** (V1Locomotion is grating-only; Christensen fits no f(S)). Build from Plan.md:
-  - dg: one-hot(direction × TF); sg: one-hot(orientation × SF × phase).
-  - **ns (per [Plan.md](Plan.md) L32): define `f(S)` = per-image mean response** (118 images via `frame`, blank `-1` excluded) — subtract the per-image mean and fit the running terms to the **residual**. Mind the dimensionality: 118 conditions, ~50 trials/image.
-  - spontaneous: constant.
-- [ ] **C3** Drift baseline β₀(t) — `n_basis` tent functions over trial/session time (default 20).
-- [ ] **C4** Running terms — additive `β_add·V`; multiplicative ReLU gain `max(1 + β_mult·V, 0)` on `f(S)`. Expect **both** terms: grating data show ~38% of cells multiplicative (gain ≈1.5) + ~27% additive (Dadarlat & Stryker 2017). For folding running into a natural-image model, see the V1T template (Li et al. 2023) in [`REFERENCES.md`](REFERENCES.md).
-- [ ] **C5** Fitter — ridge auto-λ (`sklearn.RidgeCV` or port `ridgeMML`) + alternating least squares for the gain (~5 iters).
-- [ ] **C6** `fit_all()` (L707–717) — four nested models (Null/Add/Mult/Full) per cell; **cross-validated R²** via B9 → `r2_null/add/mult/full`.
-- [ ] **C7** `r2_decomposition()` (L719–731) → `delta_add/mult/full = model − null` (on CV R²).
-- [ ] **C8** `plot_r2_decomposition()` (L735–741) — box/violin per model, **split by stimulus (gratings vs natural)**.
+Owns `utils.py` `EncodingModel` (from L705) + module-level `tent_basis` (L678).
+**Implemented as a linear nested GLM with a fitted, ridge-penalized one-hot tuning `A·s(t)`** (as in Liska/Yates), a drifting baseline, and running as additive `β_add·V` + a linearized multiplicative gate `β_mult·(V·d̂(S))`. Fitter: z-scored features, GCV-selected ridge via a closed-form SVD solve (Null/Add fit multi-target across all cells); no alternating least squares (the single-scalar gain is negligible for gratings — see §7). Methodology, results & interpretation: [`EncodingModel.md`](EncodingModel.md).
+- [x] **C1** `tent_basis(x, centers)` (L678) — partition-of-unity tent basis; unit-tested.
+- [x] **C2** `f(S) = A·s(t)` — a **fitted, ridge-penalized one-hot tuning** (`_stimulus_onehot`, per-condition weights per neuron; ridge shrinks noisy per-condition estimates): dg orientation×TF, sg orientation×SF×phase, ns per-image (`frame`, 118), spont constant. Blank `-1` already excluded by `extract_trials`.
+- [x] **C3** drift `_drift_basis` — `n_basis` tent functions over trial time; **default 5** (matches Liska/Yates, not 20).
+- [x] **C4** running terms in `_build_design` — additive `V`; multiplicative **linear interaction `V·d̂(S)`** (running gated by the per-fold stimulus drive). No intercept *column*, but the fitter includes an **unpenalized intercept** as the baseline (kept deliberately).
+- [x] **C5** fitter — closed-form ridge with **GCV-selected λ** and unpenalized intercept (`_ridge_cv_predict`); Null/Add fit as one **multi-target** solve across cells, Mult/Full per-cell. **No ALS** (linear). The multiplicative gate `d̂(S)` is recomputed from training trials each fold, and CV uses **leakage-free blocked/purged folds by default** (`cv="blocked"`, `gap=5`) — a shuffled K-fold leaks calcium/running autocorrelation on the ~0.27 s-spaced sg/ns trials (cf. the warning at Phase 0) and inflates ΔR².
+- [x] **C6** `fit_all()` (L886) — four nested models per cell; pooled **cross-validated R²** via `sklearn.KFold` → `r2_null/add/mult/full`.
+- [x] **C7** `r2_decomposition()` (L947) → `delta_add/mult/full = model − null` (on CV R²).
+- [x] **C8** `plot_r2_decomposition()` (L973) — violin + jittered per-cell points per ΔR² term; composes across stimuli via `ax=` for the gratings-vs-natural figure.
 
-**Done when:** four models fit per cell with CV R²; ΔR² sane (`full ≥ add,mult`; not wildly negative); ns residual model runs with blank frames excluded.
+**Done ✅** — four models fit for all 47 cells with cross-validated R². Fitted arrays in `data/encoding_r2.npz`; results + interpretation in [`EncodingModel.md`](EncodingModel.md) §7. **Finding (corrected):** under **leakage-free blocked CV**, running adds **no reliable single-trial predictive power for any stimulus** (nothing survives FDR). The natural-scene-specific gain seen under an earlier *shuffled* K-fold was a **temporal-autocorrelation leakage artifact** (§7.1) — it vanishes under blocked CV, while a synthetic-gain injection *is* recovered (so it is a genuine null, not lost power). This does not contradict the population-mean gain literature (a less strict quantity; §9).
 
 ---
 
@@ -128,7 +126,7 @@ The project's whole point is comparing running modulation between **gratings** (
 1. `conda activate allensdk`; run `visual_coding.ipynb` top-to-bottom with the `.npz` in `../data/`.
 2. **A1 (DONE)**: per-stimulus significant-tuned fraction produced: 17/47 pooled (36%), 3/47 spontaneous (6%). Tuning and significance plots render (`plot_tuning_curves_grid`, `plot_monotonicity_stacked_bar`, `plot_monotonicity_grid`).
 3. **A2**: `compute_mi` across all four stimuli; scatter slope `a`≈gain; MI median printed; `mi` correlates with `run_mod_*`.
-4. **A3**: `fit_all` completes for all cells; finite ΔR² with `full ≥ add,mult`; ns residual model runs; decomposition plot renders.
+4. **Analysis 3 (C)** ✅: `fit_all` completes for all 47 cells; ΔR² finite (`full ≥ add,mult` for dg/ns); ns runs with blanks excluded; `plot_r2_decomposition` renders. Results in [`EncodingModel.md`](EncodingModel.md) §7.
 5. **Research question**: one figure/table contrasts running modulation (MI + ΔR²_mult) for **gratings (dg, sg) vs natural (ns)**, with spontaneous as baseline — comparability caveats stated explicitly.
 
 ## Milestones

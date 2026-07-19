@@ -14,3 +14,4 @@ allensdk==2.16.2     # pulls in numpy 1.23.5, pandas 1.5.3, scipy 1.10.1, matplo
 scikit-learn         # for the EncodingModel (Analysis 3) linear fits
 jupyter_black        # notebook code formatter used in visual_coding.ipynb
 ipykernel            # register the env as a Jupyter kernel
+pytest               # run the test suite: `pytest tests/`
