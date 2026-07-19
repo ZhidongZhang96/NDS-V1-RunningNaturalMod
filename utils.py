@@ -220,7 +220,7 @@ def get_condition_intervals(epoch_table: pd.DataFrame, conditions=None) -> dict:
 
     return intervals_dict
 
-def _plot_mean_sem(ax, x, data, color, alpha=0.5, label=None,
+def plot_mean_sem(ax, x, data, color, alpha=0.5, label=None,
                    linestyle='-', marker_facecolor='black',
                    marker_edgecolor='black'):
     """Plot mean ± SEM as fill_between + line with markers (NaN-safe)."""
@@ -1130,7 +1130,7 @@ class SpeedTuning:
         if ax is None:
             _, ax = plt.subplots(figsize=figsize)
 
-        _plot_mean_sem(ax, self.bins_centers, responses, semcolor,
+        plot_mean_sem(ax, self.bins_centers, responses, semcolor,
                        label=label)
         ax.set_xlabel('running speed (cm/s)')
         ax.set_ylabel(ylabel)
@@ -1265,13 +1265,13 @@ class SpeedTuning:
             if spont_responses is not None:
                 # spontaneous tuning of the same category cells with hollow markers as baseline
                 if n > 0:
-                    _plot_mean_sem(ax, self.bins_centers, spont_responses[mask],
+                    plot_mean_sem(ax, self.bins_centers, spont_responses[mask],
                                    color, alpha=0.15, linestyle='--',
                                    marker_facecolor='none')
 
             # category cells in colour
             if n > 0:
-                _plot_mean_sem(ax, self.bins_centers, responses[mask],
+                plot_mean_sem(ax, self.bins_centers, responses[mask],
                                color, alpha=0.5)
 
             rho_mean = rho[mask].mean() if n > 0 else float('nan')
@@ -1296,12 +1296,12 @@ class SpeedTuning:
             n = nm_mask.sum()
 
             if spont_responses is not None and n > 0:
-                _plot_mean_sem(ax4, self.bins_centers, spont_responses[nm_mask],
+                plot_mean_sem(ax4, self.bins_centers, spont_responses[nm_mask],
                                NTM_COLOR, alpha=0.15, linestyle='--',
                                marker_facecolor='none')
 
             if n > 0:
-                _plot_mean_sem(ax4, self.bins_centers, responses[nm_mask],
+                plot_mean_sem(ax4, self.bins_centers, responses[nm_mask],
                                NTM_COLOR, alpha=0.5)
             ax4.set_title(f'non-tuned mod. (n={n})')
             ax4.set_ylabel('')
@@ -1581,9 +1581,9 @@ def plot_modulated_venn(modulated_mask: dict[str, np.ndarray],
                          ax: plt.Axes = None) -> plt.Figure:
     """Venn diagram of running-modulated neurons across stimuli.
 
-    SG, NS, and Spont are shown as a 3-set Venn. Each region is labelled
-    with its count and the cell indices. Text wrapping and label anchoring
-    are optimized to prevent overlapping.
+    Of the four stimulus conditions (DG, SG, NS, Spont), the one with the
+    *fewest* modulated neurons is excluded from the 3-set Venn and shown
+    as a text note at the bottom instead.
 
     Parameters
     ----------
@@ -1598,97 +1598,145 @@ def plot_modulated_venn(modulated_mask: dict[str, np.ndarray],
     -------
     plt.Figure
     """
-    sg = set(np.where(modulated_mask['static_gratings'])[0])
-    ns = set(np.where(modulated_mask['natural_scenes'])[0])
-    sp = set(np.where(modulated_mask['spontaneous'])[0])
-    dg = set(np.where(modulated_mask['drifting_gratings'])[0])
-
-    regions = {
-        'only_SG':     sorted(sg - ns - sp),
-        'only_NS':     sorted(ns - sg - sp),
-        'only_Spont':  sorted(sp - sg - ns),
-        'SG∩NS':       sorted((sg & ns) - sp),
-        'SG∩Spont':    sorted((sg & sp) - ns),
-        'NS∩Spont':    sorted((ns & sp) - sg),
-        'SG∩NS∩Spont': sorted(sg & ns & sp),
+    # ---- raw sets for all 4 stimuli ----
+    sets = {
+        'DG':    set(np.where(modulated_mask['drifting_gratings'])[0]),
+        'SG':    set(np.where(modulated_mask['static_gratings'])[0]),
+        'NS':    set(np.where(modulated_mask['natural_scenes'])[0]),
+        'Spont': set(np.where(modulated_mask['spontaneous'])[0]),
     }
 
+    # ---- determine which stimulus to exclude (fewest modulated) ----
+    sizes = {k: len(v) for k, v in sets.items()}
+    excluded_key = min(sizes, key=sizes.get)
+    # Venn can only show 3 sets; use the 3 largest.
+    venn_keys = sorted(sets, key=lambda k: sizes[k], reverse=True)[:3]
+
+    # alias for convenience
+    A, B, C = venn_keys
+
+    # ---- region computations ----
+    sA, sB, sC = sets[A], sets[B], sets[C]
+    regions = {
+        f'only_{A}':       sorted(sA - sB - sC),
+        f'only_{B}':       sorted(sB - sA - sC),
+        f'only_{C}':       sorted(sC - sA - sB),
+        f'{A}∩{B}':        sorted((sA & sB) - sC),
+        f'{A}∩{C}':        sorted((sA & sC) - sB),
+        f'{B}∩{C}':        sorted((sB & sC) - sA),
+        f'{A}∩{B}∩{C}':   sorted(sA & sB & sC),
+    }
+
+    # ---- figure / axes ----
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
     else:
         fig = ax.figure
     ax.set_aspect('equal')
 
+    # ---- three-circle geometry ----
     r = 1.25
     side = 1.45
     h = side * 3**0.5 / 2
-    
-    cen = {
-        'SG':    np.array([-side / 2, -h / 3]),
-        'NS':    np.array([ side / 2, -h / 3]),
-        'Spont': np.array([0,         2 * h / 3]),
-    }
-    color="#7F8C8D"
-    # colors = {'SG': '#E74C3C', 'NS': '#3498DB', 'Spont': '#7F8C8D'}
-    
-    label_pos = {
-        'Spont': np.array([0,                  2 * h / 3 + r + 0.1]),
-        'SG':    np.array([-side / 2 - r*0.7, -h / 3 - r*0.75]),
-        'NS':    np.array([ side / 2 + r*0.7, -h / 3 - r*0.75]),
-    }
-    label_align = {
-        'Spont': ('center', 'bottom'),
-        'SG':    ('right', 'top'),
-        'NS':    ('left', 'top'),
-    }
+
+    # Assign physical triangle positions (bottom-left, bottom-right, top).
+    # Prefer SG/DG on the left, NS on the right, Spont on top.
+    _order = {'SG': 0, 'DG': 1, 'NS': 2, 'Spont': 3}
+    sorted_vk = sorted(venn_keys, key=lambda k: _order.get(k, 9))
+    bot_left_k, bot_right_k, top_k = (
+        sorted_vk[0], sorted_vk[1], sorted_vk[2]
+    )
+
+    cen = {}
+    label_pos = {}
+    label_align = {}
+
+    cen[bot_left_k] = np.array([-side / 2, -h / 3])
+    label_pos[bot_left_k] = np.array([-side / 2 - r * 0.7, -h / 3 - r * 0.75])
+    label_align[bot_left_k] = ('right', 'top')
+
+    cen[bot_right_k] = np.array([side / 2, -h / 3])
+    label_pos[bot_right_k] = np.array([side / 2 + r * 0.7, -h / 3 - r * 0.75])
+    label_align[bot_right_k] = ('left', 'top')
+
+    cen[top_k] = np.array([0, 2 * h / 3])
+    label_pos[top_k] = np.array([0, 2 * h / 3 + r + 0.1])
+    label_align[top_k] = ('center', 'bottom')
+
+    color = "#7F8C8D"
 
     for name, pos in cen.items():
         ax.add_patch(Circle(pos, r, facecolor=color,
                             edgecolor=color, alpha=0.15, lw=2, zorder=1))
-        
         l_pos, (ha, va) = label_pos[name], label_align[name]
-        display_name = name if name == 'Spont' else name[:2].upper() 
+        display_name = name if name == 'Spont' else name[:2].upper()
         ax.text(l_pos[0], l_pos[1], display_name,
                 ha=ha, va=va, fontsize=16, fontweight='bold',
                 color=color, zorder=4)
 
-    txt = {
-        'only_Spont':      np.array([ 0,     1.50]),
-        'only_SG':         np.array([-1.25, -0.65]),
-        'only_NS':         np.array([ 1.25, -0.65]),
-        'SG∩Spont':        np.array([-0.85,  0.45]),
-        'NS∩Spont':        np.array([ 0.85,  0.45]),
-        'SG∩NS':           np.array([ 0,    -0.85]),
-        'SG∩NS∩Spont':     np.array([ 0,     0.05]), 
+    # ---- text positions for the 7 regions (relative to circle centres) ----
+    txt_offsets = {
+        'top':        np.array([0,     1.50]),
+        'bot_left':   np.array([-1.25, -0.65]),
+        'bot_right':  np.array([1.25,  -0.65]),
+        'top∩left':   np.array([-0.85,  0.45]),
+        'top∩right':  np.array([0.85,   0.45]),
+        'left∩right': np.array([0,     -0.85]),
+        'all':        np.array([0,      0.05]),
     }
 
+    # map region name → offset key
+    def _offset_key(region_name, tl, tr, tp):
+        parts = region_name.split('∩')
+        # Strip 'only_' prefix so 'only_NS' → 'NS'
+        parts = [p.split('only_')[-1] for p in parts]
+        if len(parts) == 3:
+            return 'all'
+        if len(parts) == 2:
+            if tp in parts:
+                # intersection with top
+                return 'top∩left' if tl in parts else 'top∩right'
+            else:
+                return 'left∩right'
+        # single-set region
+        p = parts[0]
+        if p == tp:
+            return 'top'
+        if p == tl:
+            return 'bot_left'
+        return 'bot_right'
+
     for key, idxs in regions.items():
-        pos = txt[key]
         cnt = len(idxs)
         if cnt == 0:
-            continue 
+            continue
+        ok = _offset_key(key, bot_left_k, bot_right_k, top_k)
+        pos = txt_offsets[ok]
 
         ax.text(pos[0], pos[1], str(cnt),
                 ha='center', va='center', fontsize=17, fontweight='bold', zorder=4)
-        
-        if cnt > 0:
-            show_cells = idxs[:10]
-            cell_str = ', '.join(map(str, show_cells))
-            if cnt > 10:
-                cell_str += ', ...'
-            
-            wrapped_str = textwrap.fill(cell_str, width=16)
-            
-            ax.text(pos[0], pos[1] - 0.18, wrapped_str,
-                    ha='center', va='top', fontsize=7, color='#444444', zorder=4)
 
-    dg_str = ', '.join(str(c) for c in sorted(dg))
+        show_cells = idxs[:5]
+        cell_str = ', '.join(map(str, show_cells))
+        if cnt > 5:
+            cell_str += ', …'
+        wrapped_str = textwrap.fill(cell_str, width=16)
+        ax.text(pos[0], pos[1] - 0.18, wrapped_str,
+                ha='center', va='top', fontsize=7, color='#444444', zorder=4)
+
+    # ---- excluded group note at bottom ----
+    excluded_items = sorted(sets[excluded_key])
+    exc_str = ', '.join(str(c) for c in excluded_items)
     ax.text(0, -2.1,
-            f'DG modulated: cell {dg_str}  (subset of SG ∩ NS)',
+            f'{excluded_key} modulated (excluded): cell {exc_str}',
             ha='center', fontsize=9, style='italic', color='#666666', zorder=4)
 
-    all_mod = sg | ns | sp | dg
-    outside = 47 - len(all_mod)
+    # ---- not-modulated count ----
+    all_mod = set()
+    for s in sets.values():
+        all_mod |= s
+    n_total = len(next(iter(modulated_mask.values())))
+    outside = n_total - len(all_mod)
     ax.text(2.30, -1.9, f'Not modulated\n{outside}',
             ha='center', va='center', fontsize=10, fontweight='bold', color='#666666')
 
@@ -1705,12 +1753,12 @@ def plot_monotonicity_stacked_bar(tunings: dict[str, SpeedTuning],
                                    colors: dict[str, str]| None = None,
                                    modulated_mask: dict[str, np.ndarray] | None = None,
                                    figsize=(5, 4)) -> plt.Axes:
-    """Stacked bar chart: for each stimulus, breakdown of significantly tuned
-    neurons by monotonicity (positive / negative / non-monotonic).
+    """Stacked bar chart: for each stimulus, breakdown of significantly
+    speed-tuned neurons by monotonicity (positive / negative / non-monotonic).
 
-    When *modulated_mask* is provided, a light-grey ghost bar is drawn behind
-    each stacked bar showing the total modulated pool, with the count labelled
-    above it.
+    When *modulated_mask* is provided, a wider light-grey background bar shows
+    the total modulated count, and the stacked bars are restricted to the
+    modulated pool so the stacked total never exceeds the background.
 
     Parameters
     ----------
@@ -1723,7 +1771,8 @@ def plot_monotonicity_stacked_bar(tunings: dict[str, SpeedTuning],
         negative=NEG_COLOR (blue), non-monotonic=NM_COLOR (grey).
     modulated_mask : dict[str, np.ndarray] | None, optional
         Per-stimulus boolean masks ``(n_cells,)`` for running-modulated cells.
-        When provided, a ghost bar shows the total modulated pool per stimulus.
+        When provided, the stacked bars are restricted to modulated cells and a
+        wider background bar shows the modulated pool size.
 
     Returns
     -------
@@ -1738,40 +1787,51 @@ def plot_monotonicity_stacked_bar(tunings: dict[str, SpeedTuning],
     labels = list(tunings.keys())
     categories = ['non-monotonic', 'negative', 'positive']
 
-    # modulated pool: ghost bar behind the stacked bars
+    x = np.arange(len(labels))
+
+    # ---- wider background bar: total modulated count ----
     if modulated_mask is not None:
-        # n_neurons from first tuning (compute_spearman() required)
-        _first = next(iter(tunings.values()))
-        assert _first.rho is not None
-        n_neurons = len(_first.rho)
+        n_total = len(next(iter(tunings.values())).rho)
         mod_counts = np.array([
             int(modulated_mask[lbl].sum())
             if lbl in modulated_mask and modulated_mask[lbl] is not None
-            else n_neurons
+            else n_total
             for lbl in labels
         ])
-        x = np.arange(len(labels))
-        bar_heights = mod_counts + 0.2
-        ax.bar(x, bar_heights, 0.6, bottom=0, color='lightgray', alpha=0.35,
+        ax.bar(x, mod_counts, 0.6, bottom=0, color='lightgray', alpha=0.35,
                edgecolor='gray', linewidth=0.6, label='modulated', zorder=0)
-        for i, lbl in enumerate(labels):
+        for i in range(len(labels)):
             ax.text(i, mod_counts[i] + 0.5, str(int(mod_counts[i])),
                     ha='center', va='bottom', fontsize=9, color='gray',
                     fontweight='bold')
         ax.margins(y=0.1)
 
-    # breakdown of significant cells in each category, per stimulus
+    # ---- stacked bar: tuned neurons restricted to modulated pool ----
     counts = {}
     for lbl in labels:
         t = tunings[lbl]
         assert t.monotonic_mask is not None, "call compute_spearman() first"
-        if t.significant_mask is None or t.significant_mask.sum() == 0:
-            counts[lbl] = {c: 0.0 for c in categories}
+        assert t.significant_mask is not None, "call significance_test() first"
+
+        mm = modulated_mask.get(lbl) if modulated_mask else None
+        if mm is not None:
+            n_tuning = len(t.monotonic_mask['positive'])
+            if len(mm) != n_tuning:
+                counts[lbl] = {
+                    c: t.monotonic_mask[c].sum() for c in categories
+                }
+            else:
+                counts[lbl] = {
+                    c: (t.monotonic_mask[c] & mm).sum() for c in categories
+                }
         else:
             sig = t.significant_mask
-            n = sig.sum()
-            counts[lbl] = {c: t.monotonic_mask[c][sig].sum()
-                            for c in categories}
+            if sig is None or sig.sum() == 0:
+                counts[lbl] = {c: 0.0 for c in categories}
+            else:
+                counts[lbl] = {
+                    c: t.monotonic_mask[c][sig].sum() for c in categories
+                }
 
     x = np.arange(len(labels))
     bottom = np.zeros(len(labels))
@@ -1795,7 +1855,7 @@ def plot_monotonicity_stacked_bar(tunings: dict[str, SpeedTuning],
 
     ax.set_xticks(x)
     ax.set_xticklabels([stim_to_short(l) for l in labels])
-    ax.set_ylabel('# tuned neurons')
+    ax.set_ylabel('# neurons')
     ax.legend(fontsize=9)
     return ax
 
