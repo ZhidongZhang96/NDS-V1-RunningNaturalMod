@@ -10,7 +10,7 @@ It has been shown that layer 2/3 and 4 neurons in mouse V1 are positively modula
 
 > How does running speed modulate V1 neuron responses, and how does that modulation differ across stimulus types (`drifting_gratings`, `static_gratings`, `natural_scenes`) and compared to spontaneous (no-stimulus) activity?
 
-We focus on how running speed modulates response amplitude, via three analyses (see [`Plan.md`](doc/Plan.md) for the full math):
+We focus on how running speed modulates response amplitude, via three analyses:
 
 1. **Binned speed tuning** — bin running speed, build per-neuron tuning curves, test significance with a one-way ANOVA across speed bins, and quantify monotonicity with Spearman's ρ.
 2. **Binary running/still conditions** — split trials into *running* vs *still*, compute a sign-safe Modulation Index `MI = (R_run − R_still) / (|R_run| + |R_still| + ε)`, and fit a gain model `R_run = a·R_still + b` (a = multiplicative, b = additive).
@@ -25,7 +25,7 @@ We focus on how running speed modulates response amplitude, via three analyses (
 ```
 NDS-V1-RunningNaturalMod/
 ├── utils.py                  # Shared code: load_data, extract_trials, TrialData, Plotter + the 3 analysis classes
-├── Unified_V1_demo.ipynb     # ⭐ Start here: demos of all 3 analyses (V1)
+├── Unified_V1_notebook.ipynb     # ⭐ Start here: demos of all 3 analyses (V1)
 ├── visual_coding.ipynb       # Data tour + trial-extraction walkthrough
 ├── Session B&A*.ipynb        # Detailed Analyses 1 & 2 (speed tuning + running modulation), incl. V1 pooling
 ├── EncodingModel_demo.ipynb  # Detailed Analysis 3 (encoding model, two-metric result)
@@ -44,7 +44,7 @@ NDS-V1-RunningNaturalMod/
 
 | Notebook | What it demonstrates |
 |---|---|
-| [`Unified_V1_demo.ipynb`](Unified_V1_demo.ipynb) | ⭐ **Start here.** One executed notebook with the key result of all three analyses, with **V1 as the main population**, VISpm as a control. |
+| [`Unified_V1_notebook.ipynb`](Unified_V1_notebook.ipynb) | ⭐ **Start here.** One executed notebook with the key result of all three analyses, with **V1 as the main population**, VISpm as a control. |
 | [`visual_coding.ipynb`](visual_coding.ipynb) | Data tour + preprocessing: how trials are extracted from the Allen `.npz`. |
 | [`Session B&A.ipynb`](Session%20B%26A.ipynb) & [`Session B&A for V1_all.ipynb`](Session%20B%26A%20for%20V1_all.ipynb) | Full **Analyses 1 & 2** (speed tuning + binary running modulation), including the pooled-V1 run. |
 | [`EncodingModel_demo.ipynb`](EncodingModel_demo.ipynb) | Full **Analysis 3** (nested encoding model, ΔR² decomposition, two-metric result). |
@@ -59,7 +59,7 @@ NDS-V1-RunningNaturalMod/
 | [`doc/EncodingModel.md`](doc/EncodingModel.md) | **Analysis 3** report: the two-metric V1 result, the CV-leakage fix, and area-specificity. |
 | [`doc/REFERENCES.md`](doc/REFERENCES.md) | Literature map (cite-X-for-Y) behind the methods and findings. |
 
-> **`data/`** holds the bundled `visual_coding_data.npz` (the VISpm 47-cell cohort) + `neurons_metadata.csv`, plus the committed encoding-model result caches (`encoding_*.npz`, `robust_null.npz`). The large per-container V1 session dumps (`container_*.npz`, ~0.6 GB each) are **fetched on demand** via `scripts/download_container.py` and are git-ignored — `Unified_V1_demo.ipynb`'s setup cell prints the exact command if they're missing.
+> **`data/`** holds the bundled `visual_coding_data.npz` (the VISpm 47-cell cohort) + `neurons_metadata.csv`, plus the committed encoding-model result caches (`encoding_*.npz`, `robust_null.npz`). The large per-container V1 session dumps (`container_*.npz`, ~0.6 GB each) are **fetched on demand** via `scripts/download_container.py` and are git-ignored — `Unified_V1_notebook.ipynb`'s setup cell prints the exact command if they're missing.
 
 ## Getting started
 
