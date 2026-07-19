@@ -11,11 +11,9 @@ diverge sharply. Companion docs: [`Plan.md`](Plan.md) (math), [`REFERENCES.md`](
 > **Headline.** In V1, running produces **strong, robust, area-specific modulation on the
 > population-mean metric**: a running/stationary rate ratio of **≈ 1.5–2.5** and a highly
 > significant mean-evoked increase (p < 1e-30, up to 1e-47), pooled over **363 cells / 3 V1
-> containers** — quantitatively matching the V1 locomotion literature (Liska/Yates ≈ 1.40;
-> Dadarlat & Stryker). The **same cells show ~null cross-validated single-trial ΔR²** — running
-> does not improve *out-of-fold single-trial prediction* beyond stimulus tuning. This **divergence
-> — real population gain, null single-trial prediction — is the central finding** (§7.3), and it
-> is the correct reconciliation with the literature. A higher-area **VISpm** cohort (the project's
+> containers**, quantitatively matching the V1 locomotion literature (Liska/Yates ≈ 1.40;
+> Dadarlat & Stryker). The **same cells show ~null cross-validated single-trial ΔR²**: running
+> does not improve *out-of-fold single-trial prediction* beyond stimulus tuning; this **divergence** is the central finding (§7.3). A higher-area **VISpm** cohort (the project's
 > *original* data; §9) shows much weaker gain, so the effect is **area-specific**.
 
 ## 1. Hypotheses
@@ -50,13 +48,23 @@ Full :        + β_add · V(t) + β_mult · [ V(t) · d̂_i(S) ]
 - **V(t)** — per-trial mean running speed (raw).
 - **Multiplicative term** — running gated by the stimulus drive `β_mult·(V·d̂(S))`, `d̂(S)` the per-condition drive (per-fold OLS one-hot mean); a first-order linearization of Plan.md's `ReLU[1+β_mult·V]`, keeping all models linear for a clean cross-validated ΔR² decomposition. β_mult > 0 ⇒ running amplifies stimulus responses.
 
+![EncodingModel pipeline and design components](figures/pipeline_demo.png)
+
+**Figure 1. Pipeline and model components.** *Top:* the analysis flow — `load_data` →
+`extract_trials` (TrialData) → `_build_design` → the four nested models → `fit_all` (blocked-CV
+ridge) → ΔR² decomposition + population gain — with the full-model equation. *Bottom:* the actual
+design blocks for an example neuron (drifting gratings): ① the slow-drift tent basis φⱼ(t)
+(partition of unity, Σφ=1), ② the stimulus tuning f(S)=Aᵢ·s(t), ③ the running regressor V(t), and
+④ the multiplicative interaction V(t)·d̂ᵢ(S) — which concentrates the running signal onto the
+cell's high-drive trials, exactly what makes the Mult term a *gain* on the stimulus drive.
+
 ## 3. Estimation (`fit_all`)
 
 - **Ridge regression** per neuron: features z-scored, penalty λ by **generalized cross-validation (GCV)**, **intercept left unpenalised** (as in Liska/Yates's `ridgeMML`); a closed-form SVD solve (`_ridge_cv_predict`). Null/Add designs are shared across cells (one multi-target solve); Mult/Full are per-cell.
 - **Cross-validation: leakage-free blocked folds (default, `cv="blocked"`, `gap=5`).** Five contiguous time-block folds, training **purged** within `gap` trials of each test block (`_cv_splits`). Calcium (GCaMP decay ≈ 0.5 s) and running are slowly autocorrelated; a shuffled/random `KFold` interleaves each held-out trial with its temporal neighbours, so for densely-packed stimuli (ns/sg, trials ≈ 0.27 s apart) the running regressor predicts a *leaked* slow component and ΔR² is inflated (§8). Blocked folds hold out whole spans of time. `cv="shuffled"` reproduces the leaky split for comparison only.
 - **Cross-validated R²** (pooled out-of-fold), per neuron; R² < 0 admissible. **ΔR²_x = R²_x − R²_null** for x ∈ {add, mult, full}.
 - **Pooled V1 cohort:** the encoding model is fit **per container**, and the per-cell ΔR² are **pooled across containers** for population statistics (each cell an independent unit). Cells are matched across sessions within a container by Allen `cell_specimen_id`.
-- **Population-mean gain (second metric):** independent of the model — per cell, mean response on running trials (V > 3 cm/s) vs stationary (V < 0.5 cm/s), summarised as the **running/stationary rate ratio**, the **mean run−stationary difference**, and the **tuning-gain slope** (OLS slope of the running tuning curve on the stationary tuning curve; the Dadarlat & Stryker decomposition).
+- **Population-mean gain (second metric):** per cell (independent of the model), mean response on running trials (V > 3 cm/s) vs stationary (V < 0.5 cm/s), summarised as the **running/stationary rate ratio**, the **mean run−stationary difference**, and the **tuning-gain slope** (OLS slope of the running tuning curve on the stationary tuning curve; the Dadarlat & Stryker decomposition).
 
 ## 4. Statistical inference (population level)
 
@@ -76,14 +84,14 @@ Full :        + β_add · V(t) + β_mult · [ V(t) · d̂_i(S) ]
 
 | Observation | Conclusion |
 |---|---|
-| Rate ratio > 1 / mean-Δ > 0, significant | **Supports H1 on the population metric** — running boosts responses. |
-| Tuning-gain slope > 1 (or ≫ still) | **Supports H2** — modulation is gain-like (Niell/Dadarlat). |
+| Rate ratio > 1 / mean-Δ > 0, significant | **Supports H1 on the population metric**: running boosts responses. |
+| Tuning-gain slope > 1 (or ≫ still) | **Supports H2**: modulation is gain-like (Niell/Dadarlat). |
 | ΔR²_full/mult > 0, significant | **Supports H1/H2 on the strict single-trial metric.** |
-| ΔR² ≈ 0 while population gain > 1 | **Metric divergence** — a real mean gain that does not improve out-of-fold single-trial prediction (noisy signal). |
+| ΔR² ≈ 0 while population gain > 1 | **Metric divergence**: a mean gain that does not improve out-of-fold single-trial prediction (noisy signal). |
 | V1 gain ≫ VISpm gain | **Area-specific** running modulation (H3, area version). |
 
 **Realized outcome (§7):** the **population metric supports H1/H2 strongly in V1** (and area-specifically);
-the **strict single-trial ΔR² does not** (null/tiny) — the metric divergence is the result.
+the **strict single-trial ΔR² does not** (null/tiny) i.e., the metric divergence is the result.
 
 ## 7. Results
 
@@ -91,10 +99,10 @@ Pooled **V1** cohort: **3 VISp / Cux2-CreERT2 / 175 µm containers** (`511507650
 `511510650`), cells matched within each across sessions A/B → **n = 363** (91 + 158 + 114). Fit with
 `EncodingModel(td, n_basis=5).fit_all()` (blocked CV); per-cell arrays in `data/encoding_v1.npz`.
 
-### 7.1 Population-mean running gain — strong, robust, area-specific (supports H1/H2)
+### 7.1 Population-mean running gain: strong, robust, area-specific (supports H1/H2)
 
 Running vs stationary (V > 3 vs < 0.5 cm/s), pooled over 363 cells; VISpm (n=47) for contrast.
-Numbers on the spike-comparable **Allen L0 events** (ΔF/F tells the same story, larger but with
+Numbers on the spike-comparable **Allen L0 events** (ΔF/F shows the same result, larger but with
 unstable ratios):
 
 | metric (events) | V1 dg | V1 sg | V1 ns | | VISpm dg | VISpm sg | VISpm ns |
@@ -105,7 +113,7 @@ unstable ratios):
 
 ![V1 population running gain vs VISpm](figures/v1_gain.png)
 
-**Figure 1. Population running gain, V1 vs VISpm.** Running/stationary rate ratio and mean run−still
+**Figure 2. Population running gain, V1 vs VISpm.** Running/stationary rate ratio and mean run−still
 increase by stimulus. V1 shows a robust ~1.5–2.5× gain (dg 1.57 ≈ Liska/Yates's 1.40), rising for
 richer stimuli; VISpm barely exceeds 1 for gratings. Gain is highly significant across 363 cells /
 3 containers.
@@ -113,13 +121,13 @@ richer stimuli; VISpm barely exceeds 1 for gratings. Gain is highly significant 
 - **H1/H2 supported in V1 on this metric.** The gain is large, monotone in stimulus richness
   (dg < sg < ns), and quantitatively matches the V1 literature. The tuning-gain slopes (0.34–0.77;
   attenuated below the true ~1.5 by calcium/regression dilution) far exceed VISpm's (0.08–0.36),
-  i.e. a genuine **multiplicative** component.
-- **Robust, not a fluke.** The gain holds across all 3 V1 containers (n=363, p ≤ 1e-20).
+  i.e. identified a **multiplicative** component.
+- **Result is robust.** The gain holds across all 3 V1 containers (n=363, p ≤ 1e-20).
 
-### 7.2 Cross-validated single-trial ΔR² — null (does *not* support H1/H2)
+### 7.2 Cross-validated single-trial ΔR²: null (does *not* support H1/H2)
 
-The strict quantity — added out-of-fold, per-cell predictive variance of running beyond stimulus
-tuning — is ~zero for the same cohort (blocked CV, ΔF/F):
+The strict quantity (added out-of-fold, per-cell predictive variance of running beyond stimulus
+tuning) is ~zero for the same cohort (blocked CV, ΔF/F):
 
 | stimulus | ΔR²_add | ΔR²_mult | ΔR²_full |
 |---|---|---|---|
@@ -132,7 +140,7 @@ Under BH-FDR only **two tiny additive terms survive** (sg, ns; ΔR²_add ≈ +0.
 ~0.02–0.03 % of variance). The **multiplicative and full terms are null/negative for every
 stimulus**: adding running columns does not improve, and often worsens, held-out single-trial
 prediction. A large single-container drifting-gratings additive effect (ΔR²_add +0.0071, one
-animal) **did not replicate** and vanished on pooling — a cautionary single-container fluke.
+animal) **did not replicate** and vanished on pooling.
 
 ### 7.3 The divergence — the central finding
 
@@ -162,12 +170,12 @@ independent running-modulation measure.
   0.27-s-spaced sg/ns stimuli; blocked+purged folds remove it. The leakage signature (deconvolution
   collapses ns trial-to-trial autocorrelation 0.54 → 0.10, yet shuffled CV still inflates on the sharp
   signal) was characterised on the VISpm cohort (`scripts/robust_fast.py`, `robust_null.py`,
-  `deconv_ar1.py`; Fig. 2). The **population-mean gain is not cross-validated and so is unaffected by
+  `deconv_ar1.py`; Fig. 3). The **population-mean gain is not cross-validated and so is unaffected by
   this** — another reason it is the more robust readout of the effect.
 
 ![CV-leakage validation (method)](figures/cv_leakage.png)
 
-**Figure 2. Why the strict ΔR² needs blocked CV (method).** (A) per-session running; (B) shuffled vs
+**Figure 3. Why the strict ΔR² needs blocked CV (method).** (A) per-session running; (B) shuffled vs
 blocked ΔR²_full collapse; (C) synthetic-gain recovery (blocked CV recovers an injected stationary
 gain, so its nulls are genuine, not over-conservative); (D) circular-shift null. Characterised on the
 VISpm cohort; the same blocked-CV method is used throughout.
